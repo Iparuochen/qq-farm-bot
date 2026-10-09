@@ -15,6 +15,59 @@ export interface KnownFriendSettings {
   friendsListCacheTtlSec: number
 }
 
+/** 背包中可用于好友农场/土地的特殊互动道具。 */
+export interface FriendInteractionItemDto {
+  id: string
+  itemId: string
+  name: string
+  image: string
+  count: number
+  saleConditionSatisfiedCount: number
+  interactionType: string
+  protocol: string
+  selfUsable: boolean
+  targetKind: 'land' | 'farm'
+  description: string
+  activityId: string
+  sellCondition: string
+  nearestExpireTime: number
+  serverValidationRequired: boolean
+}
+
+/** 单块地使用道具的结果。 */
+export interface FriendInteractionResultDto {
+  landId: string
+  ok: boolean
+  code: string
+  message: string
+  target?: any
+  updatedLand?: any
+  interactionEffects?: any[]
+  consumed?: any[]
+  rewards?: any[]
+}
+
+/** 一次批量使用的汇总结果。 */
+export interface FriendInteractionBatchDto {
+  hostGid: string
+  ownerName: string
+  itemId: string
+  itemName: string
+  protocol: string
+  requestedLandIds: string[]
+  usedLandIds: string[]
+  failedLandIds: string[]
+  successCount: number
+  failureCount: number
+  results: FriendInteractionResultDto[]
+  updatedLands: any[]
+  interactionEffects: any[]
+  items: FriendInteractionItemDto[]
+  message: string
+  targetKind?: string
+  isSelf?: boolean
+}
+
 export const useFriendStore = defineStore('friend', () => {
   const friends = ref<any[]>([])
   const loading = ref(false)
@@ -32,6 +85,12 @@ export const useFriendStore = defineStore('friend', () => {
   const knownFriendSettingsLoading = ref(false)
   const knownFriendSettingsSaving = ref(false)
 
+  const interactionItems = ref<FriendInteractionItemDto[]>([])
+  const interactionItemsLoading = ref(false)
+  const interactionItemsError = ref('')
+  const interactionUsePending = ref(false)
+  const interactionUseError = ref('')
+
   function clearFriendData() {
     friends.value = []
     friendLands.value = {}
@@ -42,6 +101,9 @@ export const useFriendStore = defineStore('friend', () => {
     knownFriendGids.value = []
     knownFriendGidSyncCooldownSec.value = 600
     friendsListCacheTtlSec.value = 60
+    interactionItems.value = []
+    interactionItemsError.value = ''
+    interactionUseError.value = ''
   }
 
   function isCurrentAccount(accountId: string) {
@@ -349,6 +411,94 @@ export const useFriendStore = defineStore('friend', () => {
     }
   }
 
+  async function fetchFriendInteractionItems(accountId: string) {
+    if (!accountId)
+      return
+    const requestedId = String(accountId)
+    interactionItemsLoading.value = true
+    interactionItemsError.value = ''
+    try {
+      const res = await api.get('/api/friend-interaction-items', {
+        headers: { 'x-account-id': accountId },
+      })
+      if (!isCurrentAccount(requestedId))
+        return
+      if (res.data.ok) {
+        const payload = res.data.data || {}
+        interactionItems.value = Array.isArray(payload.items) ? payload.items : []
+      }
+      else {
+        interactionItemsError.value = res.data.error || '加载互动道具失败'
+      }
+    }
+    catch (error: any) {
+      if (isCurrentAccount(requestedId)) {
+        interactionItemsError.value = error?.response?.data?.error || error?.message || '加载互动道具失败'
+      }
+    }
+    finally {
+      interactionItemsLoading.value = false
+    }
+  }
+
+  async function useFriendInteractionItemBatch(
+    accountId: string,
+    gid: string | number,
+    itemId: string | number,
+    landIds: Array<string | number>,
+  ) {
+    if (!accountId || !gid || !itemId)
+      return { ok: false, message: '参数无效' } as FriendInteractionBatchDto & { ok: boolean, message: string }
+    interactionUsePending.value = true
+    interactionUseError.value = ''
+    try {
+      const res = await api.post(`/api/friend/${gid}/interaction-items/use-batch`, { itemId, landIds }, {
+        headers: { 'x-account-id': accountId },
+        timeout: 300000,
+      })
+      const data = res.data?.data || {}
+      if (Array.isArray(data.items)) {
+        interactionItems.value = data.items
+      }
+      await fetchFriendLands(accountId, String(gid))
+      return { ...data, ok: true } as FriendInteractionBatchDto & { ok: boolean }
+    }
+    catch (error: any) {
+      const message = error?.response?.data?.error || error?.message || '使用互动道具失败'
+      interactionUseError.value = message
+      return { ok: false, message } as FriendInteractionBatchDto & { ok: boolean, message: string }
+    }
+    finally {
+      interactionUsePending.value = false
+    }
+  }
+
+  async function useFriendFarmInteractionItem(accountId: string, gid: string | number, itemId: string | number) {
+    if (!accountId || !gid || !itemId)
+      return { ok: false, message: '参数无效' } as FriendInteractionBatchDto & { ok: boolean, message: string }
+    interactionUsePending.value = true
+    interactionUseError.value = ''
+    try {
+      const res = await api.post(`/api/friend/${gid}/interaction-items/use-farm`, { itemId }, {
+        headers: { 'x-account-id': accountId },
+        timeout: 300000,
+      })
+      const data = res.data?.data || {}
+      if (Array.isArray(data.items)) {
+        interactionItems.value = data.items
+      }
+      return { ...data, ok: true } as FriendInteractionBatchDto & { ok: boolean }
+    }
+    catch (error: any) {
+      const message = error?.response?.data?.error || error?.message || '使用互动道具失败'
+      interactionUseError.value = message
+      return { ok: false, message } as FriendInteractionBatchDto & { ok: boolean, message: string }
+    }
+    finally {
+      interactionUsePending.value = false
+    }
+  }
+
   async function removeUnsyncedKnownFriendGids(accountId: string, gids: number[]) {
     if (!accountId || !gids || gids.length === 0)
       return { ok: false, removedCount: 0 }
@@ -382,6 +532,11 @@ export const useFriendStore = defineStore('friend', () => {
     friendsListCacheTtlSec,
     knownFriendSettingsLoading,
     knownFriendSettingsSaving,
+    interactionItems,
+    interactionItemsLoading,
+    interactionItemsError,
+    interactionUsePending,
+    interactionUseError,
     clearFriendData,
     fetchFriends,
     fetchFriendsDogInfo,
@@ -396,5 +551,8 @@ export const useFriendStore = defineStore('friend', () => {
     removeKnownFriendGid,
     batchAddKnownFriendGids,
     removeUnsyncedKnownFriendGids,
+    fetchFriendInteractionItems,
+    useFriendInteractionItemBatch,
+    useFriendFarmInteractionItem,
   }
 })

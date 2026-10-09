@@ -1,11 +1,327 @@
 const { PlantPhase, PHASE_NAMES } = require('../config/config');
-const { getPlantName, getPlantExp, getPlantById, getPlantGrowTime, getPlantGrowPhases, getSeedImageBySeedId, getMutantDisplayPlantId, getMutantPlantImageByPhase, getMutantEffectsByIds } = require('../config/gameConfig');
+const { getPlantName, getPlantExp, getPlantById, getPlantGrowTime, getPlantGrowPhases, getSeedImageBySeedId, getMutantDisplayPlantId, getMutantPlantImageByPhase, getMutantEffectsByIds, getItemById } = require('../config/gameConfig');
 const { toNum, toTimeSec, getServerTimeSec, logWarn } = require('../utils/utils');
 const { getAllLands } = require('./farm-api');
 
 const GOLDEN_BUG_ITEM_ID = 301101;
 const GOLDEN_BUG_SOCIAL_TYPE = 2;
 const MATURE_PHASE_RECORD_ID = 19;
+
+// 抓包确认：黄金虫、足球和乌云由农场主通过自家 Farming 清理，好友帮助务农不能代为清理。
+// 乌云必须以 interaction_uses / interaction_targets 的实时记录为准；field_40={8,1} 只是清理后仍保留的历史。
+const OWNER_CLEANABLE_INTERACTION_ITEM_IDS = new Set(['301101', '301102', '5006']);
+
+// 5005 青蛙是农场级事件，不绑定某一块土地；清理时通过 FarmingRequest.field 5 发送。
+const OWNER_CLEANABLE_FARM_SOCIAL_EVENT_ITEM_IDS = new Set(['5005']);
+
+const QIXI_DEW_ITEM_ID = '301103';
+const QIXI_MUTANT_CONFIG_ID = '13';
+const QIXI_DEW_HISTORY_CODES = new Set([9, 10]);
+
+/** int64 字段统一按十进制字符串处理，避免 JS 大数精度丢失。 */
+function int64String(value) {
+  if (value == null) return '0';
+  const text = String(value && value.toString ? value.toString() : value).trim();
+  return /^-?\d+$/.test(text) ? text : '0';
+}
+
+/** 归一化成正十进制 ID 字符串，非法或 0 返回空串。 */
+function normalizePositiveId(value) {
+  const text = int64String(value);
+  return /^\d+$/.test(text) && text !== '0' ? text : '';
+}
+
+function getPlantExtendedStatuses(plant) {
+  if (Array.isArray(plant && plant.field_40)) return plant.field_40.filter(Boolean);
+  return plant && plant.field_40 ? [plant.field_40] : [];
+}
+
+function getInteractionItemMetadata(itemId) {
+  const item = getItemById(Number(itemId));
+  return {
+    name: String((item && item.name) || `道具${itemId}`),
+    activityId: toNum(item && item.activity_id)
+  };
+}
+
+function getQixiDewExtendedStatus(plant) {
+  if (!getPlantMutantConfigIds(plant).map(String).includes(QIXI_MUTANT_CONFIG_ID)) return null;
+  return getPlantExtendedStatuses(plant).find(status => (
+    QIXI_DEW_HISTORY_CODES.has(toNum(status && status.value_1))
+    && toNum(status && status.value_2) === 1
+  )) || null;
+}
+
+function getExtendedStatusInteractionItemId(plant) {
+  return getQixiDewExtendedStatus(plant) ? QIXI_DEW_ITEM_ID : '';
+}
+
+/**
+ * 从 interaction_uses / interaction_targets 还原作物上已生效的互动道具。
+ * 协议侧 uses 记录「谁用了什么」，targets 记录「作用在哪块地」，两者按 item/host/时间配对。
+ */
+function getPlantInteractionEffects(plant) {
+  const uses = Array.isArray(plant && plant.interaction_uses) ? plant.interaction_uses : [];
+  const targets = Array.isArray(plant && plant.interaction_targets) ? plant.interaction_targets : [];
+  const effects = [];
+  const usedTargetKeys = new Set();
+
+  const findTargets = (use) => {
+    const itemId = normalizePositiveId(use && use.item_id);
+    const hostGid = normalizePositiveId(use && use.host_gid);
+    const timestamp = int64String(use && use.timestamp);
+    const exact = targets.filter(target => (
+      normalizePositiveId(target && target.item_id) === itemId
+      && (!hostGid || normalizePositiveId(target && target.host_gid) === hostGid)
+      && (!timestamp || int64String(target && target.timestamp) === timestamp)
+    ));
+    if (exact.length > 0) return exact;
+    return targets.filter(target => normalizePositiveId(target && target.item_id) === itemId);
+  };
+
+  for (const use of uses) {
+    const itemId = normalizePositiveId(use && use.item_id);
+    if (!itemId) continue;
+    const metadata = getInteractionItemMetadata(itemId);
+    const matchingTargets = findTargets(use);
+    const targetList = matchingTargets.length > 0 ? matchingTargets : [null];
+    for (const target of targetList) {
+      const landId = normalizePositiveId(target && target.land_id);
+      const hostGid = normalizePositiveId(
+        (target && target.host_gid) != null ? target.host_gid : (use && use.host_gid)
+      );
+      const usedAt = int64String(
+        (target && target.timestamp) != null ? target.timestamp : (use && use.timestamp)
+      );
+      const targetKey = target
+        ? `${itemId}:${hostGid}:${usedAt}:${landId}`
+        : `${itemId}:${hostGid}:${usedAt}:`;
+      if (usedTargetKeys.has(targetKey)) continue;
+      usedTargetKeys.add(targetKey);
+      effects.push({
+        itemId,
+        itemName: metadata.name,
+        activityId: metadata.activityId,
+        effectType: toNum(use && use.effect_type),
+        landId,
+        hostGid,
+        usedAt,
+        confirmed: true,
+        source: 'protocol-land'
+      });
+    }
+  }
+
+  const extendedItemId = getExtendedStatusInteractionItemId(plant);
+  if (extendedItemId && !effects.some(effect => effect.itemId === extendedItemId)) {
+    const metadata = getInteractionItemMetadata(extendedItemId);
+    effects.push({
+      itemId: extendedItemId,
+      itemName: metadata.name,
+      activityId: metadata.activityId,
+      effectType: 0,
+      landId: '',
+      hostGid: '',
+      usedAt: '',
+      confirmed: true,
+      source: 'protocol-land'
+    });
+  }
+
+  return effects;
+}
+
+function hasOwnerCleanableInteraction(plant) {
+  const uses = Array.isArray(plant && plant.interaction_uses) ? plant.interaction_uses : [];
+  const targets = Array.isArray(plant && plant.interaction_targets) ? plant.interaction_targets : [];
+  return [...uses, ...targets].some(entry => (
+    OWNER_CLEANABLE_INTERACTION_ITEM_IDS.has(normalizePositiveId(entry && entry.item_id))
+  ));
+}
+
+function getCleanableFarmSocialEventItemIds(eventsOrReply) {
+  const events = Array.isArray(eventsOrReply)
+    ? eventsOrReply
+    : (Array.isArray(eventsOrReply && eventsOrReply.social_events) ? eventsOrReply.social_events : []);
+  return [...new Set(events
+    .map(event => normalizePositiveId(event && event.item_id))
+    .filter(itemId => OWNER_CLEANABLE_FARM_SOCIAL_EVENT_ITEM_IDS.has(itemId))
+    .map(Number))];
+}
+
+function buildFarmSocialEventDetails(eventsOrReply) {
+  const events = Array.isArray(eventsOrReply)
+    ? eventsOrReply
+    : (Array.isArray(eventsOrReply && eventsOrReply.social_events) ? eventsOrReply.social_events : []);
+  return events.map((event) => {
+    const itemId = normalizePositiveId(event && event.item_id);
+    if (!itemId) return null;
+    const metadata = getInteractionItemMetadata(itemId);
+    return {
+      itemId,
+      itemName: metadata.name,
+      activityId: metadata.activityId,
+      visitorGid: normalizePositiveId(event && event.visitor_gid),
+      occurredAt: int64String(event && event.timestamp),
+      cleanable: OWNER_CLEANABLE_FARM_SOCIAL_EVENT_ITEM_IDS.has(itemId)
+    };
+  }).filter(Boolean);
+}
+
+/**
+ * 生成单块土地的展示详情，好友农场与自己农场共用。
+ * friendMode 影响成熟态的语义：好友视角可偷为 stealable，否则为 harvested。
+ */
+function buildLandDetail(land, options = {}) {
+  const nowSec = Number(options.nowSec) || getServerTimeSec();
+  const friendMode = !!options.friendMode;
+  const landsMap = options.landsMap instanceof Map ? options.landsMap : buildLandMap([land]);
+  const id = toNum(land && land.id);
+  const level = toNum(land && land.level);
+  const maxLevel = toNum(land && land.max_level);
+  const landsLevel = toNum(land && land.lands_level);
+  const landSize = toNum(land && land.land_size);
+  const landBuff = {
+    plantYieldBonus: toNum(land && land.buff && land.buff.plant_yield_bonus),
+    plantingTimeReduction: toNum(land && land.buff && land.buff.planting_time_reduction),
+    plantExpBonus: toNum(land && land.buff && land.buff.plant_exp_bonus)
+  };
+  const context = getDisplayLandContext(land, landsMap);
+  const base = {
+    id,
+    unlocked: !!(land && land.unlocked),
+    level,
+    maxLevel,
+    landsLevel,
+    landSize,
+    landBuff,
+    couldUnlock: !!(land && land.could_unlock),
+    couldUpgrade: !!(land && land.could_upgrade),
+    occupiedByMaster: !!context.occupiedByMaster,
+    masterLandId: toNum(context.masterLandId),
+    occupiedLandIds: Array.isArray(context.occupiedLandIds) ? context.occupiedLandIds : [],
+    plantSize: 1,
+    rarity: 0,
+    mutantConfigIds: [],
+    mutantEffects: [],
+    isMutated: false,
+    purpleCrystalResonanceExpBonus: 0,
+    interactionEffects: [],
+    needInteractionCleanup: false,
+    protocolField40: null,
+    leftInorcFertTimes: null
+  };
+
+  if (!base.unlocked) {
+    return {
+      ...base,
+      status: 'locked',
+      plantName: '',
+      phaseName: friendMode ? '未解锁' : '',
+      currentSeason: 0,
+      totalSeason: 0,
+      occupiedByMaster: false,
+      masterLandId: 0,
+      occupiedLandIds: []
+    };
+  }
+
+  const sourceLand = context.sourceLand || land;
+  const plant = sourceLand && sourceLand.plant;
+  if (!plant || !Array.isArray(plant.phases) || plant.phases.length === 0) {
+    return {
+      ...base,
+      status: 'empty',
+      plantName: '',
+      phaseName: '空地',
+      currentSeason: 0,
+      totalSeason: 0
+    };
+  }
+
+  const currentPhase = getCurrentPhase(plant.phases, false, '', toNum(plant.id));
+  if (!currentPhase) {
+    return { ...base, status: 'empty', plantName: '', phaseName: '', currentSeason: 0, totalSeason: 0 };
+  }
+
+  const phaseVal = toNum(currentPhase.phase);
+  const plantId = toNum(plant.id);
+  const mutantConfigIds = [...new Set([
+    ...getPlantMutantConfigIds(plant, currentPhase).map(String),
+    ...getPlantInteractionEffects(plant)
+      .filter(effect => normalizePositiveId(effect.itemId) === QIXI_DEW_ITEM_ID)
+      .map(() => QIXI_MUTANT_CONFIG_ID)
+  ])];
+  const mutantEffects = getMutantEffectsByIds(mutantConfigIds);
+  // 协议没有独立的“紫晶共鸣”布尔值：紫金土地由 level 标识，
+  // 是否存在加成及具体比例必须以服务端 LandInfo.buff.plant_exp_bonus 为准。
+  const purpleCrystalResonanceExpBonus = level === 5 && mutantConfigIds.length > 0
+    ? Math.max(0, landBuff.plantExpBonus)
+    : 0;
+  const displayPlantId = getMutantDisplayPlantId(plantId, mutantConfigIds);
+  const plantName = getPlantName(displayPlantId) || getPlantName(plantId) || plant.name || '未知';
+  const plantCfg = getPlantById(plantId);
+  const seedId = toNum(plantCfg && plantCfg.seed_id);
+  const plantSize = Math.max(1, toNum(plantCfg && plantCfg.size) || toNum(sourceLand.land_size) || landSize || 1);
+  const totalSeason = Math.max(1, toNum(plantCfg && plantCfg.seasons) || 1);
+  const currentSeasonRaw = toNum(plant.season);
+  const currentSeason = currentSeasonRaw > 0 ? Math.min(currentSeasonRaw, totalSeason) : 1;
+  const maturePhase = Array.isArray(plant.phases)
+    ? plant.phases
+      .filter(phase => phase && toTimeSec(phase.begin_time) > 0)
+      .sort((left, right) => toTimeSec(right.begin_time) - toTimeSec(left.begin_time))[0]
+    : null;
+  const matureBegin = maturePhase ? toTimeSec(maturePhase.begin_time) : 0;
+  const matureInSec = matureBegin > nowSec ? matureBegin - nowSec : 0;
+  const statusFlags = {
+    needWater: toNum(plant.dry_num) > 0 || (toTimeSec(currentPhase.dry_time) > 0 && toTimeSec(currentPhase.dry_time) <= nowSec),
+    needWeed: (Array.isArray(plant.weed_owners) && plant.weed_owners.length > 0)
+      || (toTimeSec(currentPhase.weeds_time) > 0 && toTimeSec(currentPhase.weeds_time) <= nowSec),
+    needBug: (Array.isArray(plant.insect_owners) && plant.insect_owners.length > 0)
+      || (toTimeSec(currentPhase.insect_time) > 0 && toTimeSec(currentPhase.insect_time) <= nowSec)
+  };
+
+  let status = 'growing';
+  if (phaseVal === PlantPhase.MATURE) status = friendMode ? (plant.stealable ? 'stealable' : 'harvested') : 'harvestable';
+  else if (phaseVal === PlantPhase.DEAD) status = 'dead';
+  else if (phaseVal === PlantPhase.UNKNOWN) status = 'empty';
+
+  const protocolField40 = getPlantExtendedStatuses(plant).map(entry => ({
+    value1: int64String(entry && entry.value_1),
+    value2: int64String(entry && entry.value_2)
+  }));
+
+  return {
+    ...base,
+    status,
+    plantId,
+    displayPlantId,
+    plantName,
+    seedId,
+    seedImage: seedId > 0 ? getSeedImageBySeedId(seedId) : '',
+    phaseName: currentPhase.phaseName || PHASE_NAMES[phaseVal] || '',
+    currentSeason,
+    totalSeason,
+    matureInSec,
+    totalGrowTime: getPlantGrowTime(plantId),
+    needWater: statusFlags.needWater,
+    needWeed: statusFlags.needWeed,
+    needBug: statusFlags.needBug,
+    stealable: !!plant.stealable,
+    plantSize,
+    rarity: toNum(plant.rarity != null ? plant.rarity : (plant.rare_level != null ? plant.rare_level : plant.rarity_level)),
+    mutantConfigIds,
+    mutantEffects,
+    isMutated: mutantConfigIds.length > 0,
+    purpleCrystalResonanceExpBonus,
+    interactionEffects: getPlantInteractionEffects(plant),
+    needInteractionCleanup: hasOwnerCleanableInteraction(plant),
+    protocolField40: protocolField40.length > 0 ? protocolField40 : null,
+    leftInorcFertTimes: Object.prototype.hasOwnProperty.call(plant, 'left_inorc_fert_times')
+      ? toNum(plant.left_inorc_fert_times)
+      : null
+  };
+}
 
 function hasGoldenBug(plant) {
   return !!(plant && Array.isArray(plant.social_items) && plant.social_items.some(item => (
@@ -613,5 +929,14 @@ module.exports = {
   analyzeLands,
   resolveRemovableHarvestedLands,
   getQixiDewStatus,
-  getLandsDetail
+  getLandsDetail,
+  int64String,
+  normalizePositiveId,
+  getPlantExtendedStatuses,
+  getInteractionItemMetadata,
+  getPlantInteractionEffects,
+  hasOwnerCleanableInteraction,
+  getCleanableFarmSocialEventItemIds,
+  buildFarmSocialEventDetails,
+  buildLandDetail
 };

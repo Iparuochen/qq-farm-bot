@@ -143,6 +143,54 @@ function registerAdminFriendRoutes({
     }
   });
 
+  // 背包中当前可用于好友农场/土地的特殊互动道具。
+  app.get("/api/friend-interaction-items", async (req, res) => {
+    const accountId = getAccountOrRespond(req, res, access);
+    if (!accountId) return;
+
+    try {
+      const data = await provider.getFriendInteractionItems(accountId);
+      res.json({ ok: true, data });
+    } catch (error) {
+      sendProviderError(res, error);
+    }
+  });
+
+  // 在同一次好友访问会话内，按地块编号顺序使用特殊互动道具。
+  app.post("/api/friend/:gid/interaction-items/use-batch", async (req, res) => {
+    const accountId = getAccountOrRespond(req, res, access);
+    if (!accountId) return;
+
+    try {
+      const data = await provider.useFriendInteractionItemBatch(
+        accountId,
+        req.params.gid,
+        (req.body || {}).itemId,
+        (req.body || {}).landIds,
+      );
+      res.json({ ok: true, data });
+    } catch (error) {
+      sendProviderError(res, error);
+    }
+  });
+
+  // 对指定好友农场使用不需要地块目标的特殊互动道具（例如青蛙使坏瓶）。
+  app.post("/api/friend/:gid/interaction-items/use-farm", async (req, res) => {
+    const accountId = getAccountOrRespond(req, res, access);
+    if (!accountId) return;
+
+    try {
+      const data = await provider.useFriendFarmInteractionItem(
+        accountId,
+        req.params.gid,
+        (req.body || {}).itemId,
+      );
+      res.json({ ok: true, data });
+    } catch (error) {
+      sendProviderError(res, error);
+    }
+  });
+
   app.post("/api/friend/:gid/op", async (req, res) => {
     const accountId = getAccountOrRespond(req, res, access);
     if (!accountId) return;

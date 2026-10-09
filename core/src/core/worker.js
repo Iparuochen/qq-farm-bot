@@ -1739,6 +1739,24 @@ async function handleApiCall(msg) {
             case 'delFriend':
                 result = await delFriend(args[0]);
                 break;
+            case 'getFriendInteractionItems':
+                result = await require('../services/friend-interaction-items').getFriendInteractionItems();
+                break;
+            case 'useFriendInteractionItemBatch':
+                result = await require('../services/friend-interaction-items')
+                    .useFriendInteractionItemBatch(args[0], args[1], args[2]);
+                break;
+            case 'useFriendFarmInteractionItem':
+                result = await require('../services/friend-interaction-items')
+                    .useFriendFarmInteractionItem(args[0], args[1]);
+                break;
+            case 'getSelfInteractionItems':
+                result = await require('../services/friend-interaction-items').getSelfInteractionItems();
+                break;
+            case 'useSelfInteractionItemBatch':
+                result = await require('../services/friend-interaction-items')
+                    .useSelfInteractionItemBatch(args[0], args[1]);
+                break;
             case 'getSeeds':
                 result = await getAvailableSeeds();
                 break;

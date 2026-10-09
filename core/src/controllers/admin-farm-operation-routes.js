@@ -110,6 +110,46 @@ function registerAdminFarmOperationRoutes({
       sendProviderError(res, error);
     }
   });
+
+  // 背包中当前可对自己农场使用的特殊互动道具。
+  app.get("/api/farm/interaction-items", async (req, res) => {
+    const accountId = requireAccountAccess({
+      req,
+      res,
+      getAccountIdFromRequest,
+      canAccessAccount,
+    });
+    if (!accountId) return;
+
+    try {
+      const data = await provider.getSelfInteractionItems(accountId);
+      res.json({ ok: true, data });
+    } catch (error) {
+      sendProviderError(res, error);
+    }
+  });
+
+  // 在自己农场按地块编号顺序使用特殊互动道具。
+  app.post("/api/farm/interaction-items/use-batch", async (req, res) => {
+    const accountId = requireAccountAccess({
+      req,
+      res,
+      getAccountIdFromRequest,
+      canAccessAccount,
+    });
+    if (!accountId) return;
+
+    try {
+      const data = await provider.useSelfInteractionItemBatch(
+        accountId,
+        (req.body || {}).itemId,
+        (req.body || {}).landIds,
+      );
+      res.json({ ok: true, data });
+    } catch (error) {
+      sendProviderError(res, error);
+    }
+  });
 }
 
 module.exports = { registerAdminFarmOperationRoutes };

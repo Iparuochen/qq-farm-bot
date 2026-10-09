@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import FarmScene from '@/components/FarmScene.vue'
+import FriendsInteractionPanel from '@/components/friends/FriendsInteractionPanel.vue'
 
 type FriendActionType = 'steal' | 'water' | 'weed' | 'bug' | 'bad'
 
@@ -21,6 +22,9 @@ const props = defineProps<{
   formatFriendGold: (value: unknown) => string
   getFriendStatusText: (friend: any) => string
   getFriendStatusHint: (friend: any) => string
+  interactionItems: any[]
+  interactionItemsLoading: boolean
+  interactionUsePending: boolean
 }>()
 
 const emit = defineEmits<{
@@ -29,6 +33,8 @@ const emit = defineEmits<{
   (e: 'toggleBlacklist', friend: any, event: Event): void
   (e: 'removeKnownFriendGid', friend: any, event: Event): void
   (e: 'friendAvatarError', friend: any): void
+  (e: 'useInteraction', friendId: string, itemId: string, landIds: string[]): void
+  (e: 'useFarmInteraction', friendId: string, itemId: string): void
 }>()
 
 const currentPage = defineModel<number>('currentPage', { required: true })
@@ -153,7 +159,18 @@ function goToPage(page: number) {
       <div v-else-if="!friendLands[friend.gid] || friendLands[friend.gid]?.length === 0" class="py-4 text-center text-gray-500">
         当前没有返回土地数据，可稍后重试或先确认该好友农场是否可访问。
       </div>
-      <FarmScene v-else :lands="friendLands[friend.gid] || []" />
+      <template v-else>
+        <FarmScene :lands="friendLands[friend.gid] || []" />
+        <FriendsInteractionPanel
+          :gid="friend.gid"
+          :lands="friendLands[friend.gid] || []"
+          :items="interactionItems"
+          :loading="interactionItemsLoading"
+          :pending="interactionUsePending"
+          @use="(itemId: string, landIds: string[]) => emit('useInteraction', friend.gid, itemId, landIds)"
+          @use-farm="(itemId: string) => emit('useFarmInteraction', friend.gid, itemId)"
+        />
+      </template>
     </div>
   </div>
 

@@ -31,6 +31,10 @@ export const useFarmStore = defineStore('farm', () => {
   const dogSkillGiftLoading = ref(false)
   const dogSkillGiftError = ref('')
 
+  const selfInteractionItems = ref<any[]>([])
+  const selfInteractionItemsLoading = ref(false)
+  const selfInteractionUsePending = ref(false)
+
   function clearFarmData() {
     lands.value = []
     seeds.value = []
@@ -38,6 +42,7 @@ export const useFarmStore = defineStore('farm', () => {
     weather.value = null
     dogSkillGiftPendingCount.value = 0
     dogSkillGiftError.value = ''
+    selfInteractionItems.value = []
   }
 
   function isCurrentAccount(accountId: string) {
@@ -65,6 +70,53 @@ export const useFarmStore = defineStore('farm', () => {
     }
     finally {
       loading.value = false
+    }
+  }
+
+  async function fetchSelfInteractionItems(accountId: string) {
+    if (!accountId)
+      return
+    const requestedId = String(accountId)
+    selfInteractionItemsLoading.value = true
+    try {
+      const { data } = await api.get('/api/farm/interaction-items', {
+        headers: { 'x-account-id': accountId },
+      })
+      if (!isCurrentAccount(requestedId))
+        return
+      if (data?.ok) {
+        selfInteractionItems.value = Array.isArray(data.data?.items) ? data.data.items : []
+      }
+    }
+    catch {
+      // 道具为可选能力，加载失败不打断农场主流程。
+    }
+    finally {
+      selfInteractionItemsLoading.value = false
+    }
+  }
+
+  async function useSelfInteractionItemBatch(accountId: string, itemId: string | number, landIds: Array<string | number>) {
+    if (!accountId || !itemId)
+      return { ok: false, message: '参数无效' }
+    selfInteractionUsePending.value = true
+    try {
+      const { data } = await api.post('/api/farm/interaction-items/use-batch', { itemId, landIds }, {
+        headers: { 'x-account-id': accountId },
+        timeout: 300000,
+      })
+      const result = data?.data || {}
+      if (Array.isArray(result.items)) {
+        selfInteractionItems.value = result.items
+      }
+      await fetchLands(accountId)
+      return { ...result, ok: true }
+    }
+    catch (error: any) {
+      return { ok: false, message: error?.response?.data?.error || error?.message || '使用互动道具失败' }
+    }
+    finally {
+      selfInteractionUsePending.value = false
     }
   }
 
@@ -175,6 +227,9 @@ export const useFarmStore = defineStore('farm', () => {
     dogSkillGiftPendingCount,
     dogSkillGiftLoading,
     dogSkillGiftError,
+    selfInteractionItems,
+    selfInteractionItemsLoading,
+    selfInteractionUsePending,
     clearFarmData,
     fetchLands,
     fetchSeeds,
@@ -184,5 +239,7 @@ export const useFarmStore = defineStore('farm', () => {
     fertilizeLand,
     removePlant,
     removeAllPlants,
+    fetchSelfInteractionItems,
+    useSelfInteractionItemBatch,
   }
 })

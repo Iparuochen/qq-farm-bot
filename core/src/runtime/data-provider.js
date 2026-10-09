@@ -52,6 +52,8 @@ function createDataProvider(deps) {
     const FRIEND_TIMEOUT = { _timeoutMs: 180000 };       // 3分钟
     const SYNC_TIMEOUT = { _timeoutMs: 180000 };          // 3分钟
     const DOG_INFO_TIMEOUT = { _timeoutMs: 600000 };     // 10分钟
+    // 互动道具批量使用会进入农场会话并逐块提交，最多 48 块地，给足超时。
+    const INTERACTION_TIMEOUT = { _timeoutMs: 300000 };  // 5分钟
 
     // 浏览器整页刷新后，旧 HTTP 请求仍会在服务端继续执行。按账号合并并发的
     // 背包只读请求，避免刷新风暴把同一个 Bag RPC 重复塞进游戏连接队列。
@@ -201,6 +203,18 @@ function createDataProvider(deps) {
         syncFriendsFromGids: (ref, gids) => callWorkerApi(resolveAccountId(ref), 'syncFriendsFromGids', gids, SYNC_TIMEOUT),
         fetchFriendsDogInfo: (ref) => callWorkerApi(resolveAccountId(ref), 'fetchFriendsDogInfo', DOG_INFO_TIMEOUT),
         delFriend: (ref, gid) => callWorkerApi(resolveAccountId(ref), 'delFriend', gid),
+        // ========== 特殊互动道具 ==========
+        getFriendInteractionItems: (ref) => callWorkerApi(resolveAccountId(ref), 'getFriendInteractionItems'),
+        useFriendInteractionItemBatch: (ref, gid, itemId, landIds) => callWorkerApi(
+            resolveAccountId(ref), 'useFriendInteractionItemBatch', gid, itemId, landIds, INTERACTION_TIMEOUT
+        ),
+        useFriendFarmInteractionItem: (ref, gid, itemId) => callWorkerApi(
+            resolveAccountId(ref), 'useFriendFarmInteractionItem', gid, itemId, INTERACTION_TIMEOUT
+        ),
+        getSelfInteractionItems: (ref) => callWorkerApi(resolveAccountId(ref), 'getSelfInteractionItems'),
+        useSelfInteractionItemBatch: (ref, itemId, landIds) => callWorkerApi(
+            resolveAccountId(ref), 'useSelfInteractionItemBatch', itemId, landIds, INTERACTION_TIMEOUT
+        ),
 
         // ========== 仓库 ==========
         useItem: (ref, itemId, count, uid) => callWorkerApi(resolveAccountId(ref), 'useItem', itemId, count, uid),

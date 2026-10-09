@@ -37,6 +37,9 @@ const {
   friendsListCacheTtlSec,
   knownFriendSettingsLoading,
   knownFriendSettingsSaving,
+  interactionItems,
+  interactionItemsLoading,
+  interactionUsePending,
 } = storeToRefs(friendStore)
 const { status, loading: statusLoading, realtimeConnected, currentStatusReady } = storeToRefs(statusStore)
 
@@ -248,6 +251,7 @@ async function loadData() {
       friendStore.fetchFriends(currentAccountId.value)
       friendStore.fetchBlacklist(currentAccountId.value)
       friendStore.fetchInteractRecords(currentAccountId.value)
+      friendStore.fetchFriendInteractionItems(currentAccountId.value)
       if (isQqAccount.value) {
         friendStore.fetchKnownFriendSettings(currentAccountId.value)
       }
@@ -363,6 +367,44 @@ async function handleOp(friendId: string, type: string, e: Event) {
       }
       return result
     })
+  }
+}
+
+async function handleUseInteraction(friendId: string, itemId: string, landIds: string[]) {
+  if (!currentAccountId.value || !itemId || landIds.length === 0)
+    return
+  const result: any = await friendStore.useFriendInteractionItemBatch(
+    currentAccountId.value,
+    friendId,
+    itemId,
+    landIds,
+  )
+  if (result?.ok) {
+    if (Number(result.failureCount || 0) > 0) {
+      toast.warning(result.message || `成功 ${result.successCount} 块，失败 ${result.failureCount} 块`)
+    }
+    else {
+      toast.success(result.message || `已使用 ${result.successCount} 个道具`)
+    }
+  }
+  else {
+    toast.error(result?.message || '使用互动道具失败')
+  }
+}
+
+async function handleUseFarmInteraction(friendId: string, itemId: string) {
+  if (!currentAccountId.value || !itemId)
+    return
+  const result: any = await friendStore.useFriendFarmInteractionItem(
+    currentAccountId.value,
+    friendId,
+    itemId,
+  )
+  if (result?.ok) {
+    toast.success(result.message || '已在好友农场使用道具')
+  }
+  else {
+    toast.error(result?.message || '使用互动道具失败')
   }
 }
 
@@ -765,11 +807,16 @@ async function handleBatchAddKnownFriendGids() {
             :format-friend-gold="formatFriendGold"
             :get-friend-status-text="getFriendStatusText"
             :get-friend-status-hint="getFriendStatusHint"
+            :interaction-items="interactionItems"
+            :interaction-items-loading="interactionItemsLoading"
+            :interaction-use-pending="interactionUsePending"
             @toggle-friend="toggleFriend"
             @operate="handleOp"
             @toggle-blacklist="handleToggleBlacklist"
             @remove-known-friend-gid="handleRemoveKnownFriendGid"
             @friend-avatar-error="handleFriendAvatarError"
+            @use-interaction="handleUseInteraction"
+            @use-farm-interaction="handleUseFarmInteraction"
           />
         </template>
       </div>
