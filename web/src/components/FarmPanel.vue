@@ -2,21 +2,51 @@
 import { useIntervalFn } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import ConfirmModal from '@/components/ConfirmModal.vue'
-import FarmScene from '@/components/FarmScene.vue'
 import { useAccountStore } from '@/stores/account'
 import { useFarmStore } from '@/stores/farm'
 import { useStatusStore } from '@/stores/status'
+import { useToastStore } from '@/stores/toast'
+import ConfirmModal from '@/components/ConfirmModal.vue'
+import FarmScene from '@/components/FarmScene.vue'
+import InteractionItemPanel from '@/components/InteractionItemPanel.vue'
 
 const farmStore = useFarmStore()
 const accountStore = useAccountStore()
 const statusStore = useStatusStore()
-const { lands, summary, weather, loading, dogSkillGiftPendingCount, dogSkillGiftLoading, dogSkillGiftError } = storeToRefs(farmStore)
+const toast = useToastStore()
+const {
+  lands,
+  summary,
+  weather,
+  loading,
+  dogSkillGiftPendingCount,
+  dogSkillGiftLoading,
+  dogSkillGiftError,
+  selfInteractionItems,
+  selfInteractionItemsLoading,
+  selfInteractionUsePending,
+} = storeToRefs(farmStore)
 const { currentAccountId, currentAccount } = storeToRefs(accountStore)
 const { status, loading: statusLoading, realtimeConnected, currentStatusReady } = storeToRefs(statusStore)
 
 const operating = ref(false)
 const farmLoaded = ref(false)
+const interactionPanelVisible = ref(false)
+
+async function handleSelfUseInteraction(itemId: string, landIds: string[]) {
+  if (!currentAccountId.value || !itemId || landIds.length === 0)
+    return
+  const result: any = await farmStore.useSelfInteractionItemBatch(currentAccountId.value, itemId, landIds)
+  if (result?.ok) {
+    if (Number(result.failureCount || 0) > 0)
+      toast.warning(result.message || `成功 ${result.successCount} 块，失败 ${result.failureCount} 块`)
+    else
+      toast.success(result.message || `已使用 ${result.successCount} 个道具`)
+  }
+  else {
+    toast.error(result?.message || '使用互动道具失败')
+  }
+}
 const confirmVisible = ref(false)
 const farmViewport = ref<HTMLElement | null>(null)
 const farmStageWidth = ref<number | null>(null)
@@ -266,6 +296,15 @@ onUnmounted(() => {
             <div class="i-carbon-trash-can" />
             一键铲除
           </button>
+          <button
+            v-if="selfInteractionItems.length > 0"
+            class="flex items-center justify-center gap-1.5 rounded bg-amber-600 px-3 py-2 text-sm text-white transition hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="operating"
+            @click="interactionPanelVisible = !interactionPanelVisible"
+          >
+            <div class="i-carbon-game-console" />
+            互动道具
+          </button>
         </div>
       </div>
 
@@ -344,6 +383,15 @@ onUnmounted(() => {
         </div>
 
         <div v-else>
+          <InteractionItemPanel
+            v-if="interactionPanelVisible"
+            gid="self"
+            :lands="lands"
+            :items="selfInteractionItems"
+            :loading="selfInteractionItemsLoading"
+            :pending="selfInteractionUsePending"
+            @use="handleSelfUseInteraction"
+          />
           <div ref="farmViewport">
             <FarmScene
               :lands="lands"

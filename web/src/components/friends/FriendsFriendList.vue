@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import FarmScene from '@/components/FarmScene.vue'
-import FriendsInteractionPanel from '@/components/friends/FriendsInteractionPanel.vue'
+import InteractionItemPanel from '@/components/InteractionItemPanel.vue'
 
 type FriendActionType = 'steal' | 'water' | 'weed' | 'bug' | 'bad'
 
@@ -161,7 +161,7 @@ function goToPage(page: number) {
       </div>
       <template v-else>
         <FarmScene :lands="friendLands[friend.gid] || []" />
-        <FriendsInteractionPanel
+        <InteractionItemPanel
           :gid="friend.gid"
           :lands="friendLands[friend.gid] || []"
           :items="interactionItems"
