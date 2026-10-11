@@ -201,13 +201,14 @@ function createRuntimeEngine(options = {}) {
                 // 为移植前已扫码保存凭证的微信账号执行一次默认策略迁移。
                 if (acc.platform === 'wx' && acc.loginBuffer && acc.wxDefaultsApplied !== true) {
                     const currentRefresh = store.getAutoCodeRefresh(acc.id);
+                    // 默认关闭：仅补齐间隔字段，不替用户开启定时刷新。
                     store.setAutoCodeRefresh(acc.id, {
-                        enabled: true,
+                        enabled: false,
                         intervalMinutes: currentRefresh.intervalMinutes || 60
                     });
                     store.addOrUpdateAccount({ id: acc.id, wxDefaultsApplied: true });
                     acc.wxDefaultsApplied = true;
-                    log('系统', `已为微信扫码账号 ${acc.name} 默认开启自动刷新 Code`, {
+                    log('系统', `已初始化微信扫码账号 ${acc.name} 的自动刷新 Code 设置（默认关闭）`, {
                         accountId: String(acc.id), accountName: acc.name
                     });
                 }

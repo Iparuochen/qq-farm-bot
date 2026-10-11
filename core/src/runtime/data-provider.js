@@ -329,7 +329,8 @@ function createDataProvider(deps) {
                 prioritizeGrowthTasks: s.prioritizeGrowthTasks,
                 intervals: s.intervals,
                 friendQuietHours: s.friendQuietHours,
-                autoCodeRefresh: s.autoCodeRefresh,
+                // autoCodeRefresh 刻意不在此透传：保存其它设置时页面会带上加载时的旧快照，
+                // 导致用户刚关闭的开关被写回。该字段只能经专用接口 /api/settings/auto-code-refresh 修改。
                 fertilizerBuyOrganicCount: s.fertilizerBuyOrganicCount,
                 fertilizerBuyOrganicThresholdHours: s.fertilizerBuyOrganicThresholdHours,
                 fertilizerBuyNormalCount: s.fertilizerBuyNormalCount,
@@ -346,9 +347,6 @@ function createDataProvider(deps) {
             store.applyConfigSnapshot(patch, { accountId: id });
             const rev = nextConfigRevision();
             broadcastConfigToWorkers(id);
-            if (s.autoCodeRefresh && typeof scheduleAutoCodeRefresh === 'function') {
-                scheduleAutoCodeRefresh(id);
-            }
             return {
                 strategy: store.getPlantingStrategy(id),
                 prioritize2x2Crops: store.getPrioritize2x2Crops(id),
