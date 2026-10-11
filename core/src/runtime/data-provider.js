@@ -50,10 +50,14 @@ function createDataProvider(deps) {
 
     // 超时配置
     const FRIEND_TIMEOUT = { _timeoutMs: 180000 };       // 3分钟
+    // 纯读 Worker 内存缓存，不走网络，给 15 秒足够
+    const FRIEND_CACHE_TIMEOUT = { _timeoutMs: 15000 };  // 15秒
     const SYNC_TIMEOUT = { _timeoutMs: 180000 };          // 3分钟
     const DOG_INFO_TIMEOUT = { _timeoutMs: 600000 };     // 10分钟
     // 互动道具批量使用会进入农场会话并逐块提交，最多 48 块地，给足超时。
     const INTERACTION_TIMEOUT = { _timeoutMs: 300000 };  // 5分钟
+    // 雨落成诗：快照需串行 3 个协议请求，好友扫描最多进出 5 次好友农场。
+    const WEATHER_TIMEOUT = { _timeoutMs: 300000 };       // 5分钟
 
     // 浏览器整页刷新后，旧 HTTP 请求仍会在服务端继续执行。按账号合并并发的
     // 背包只读请求，避免刷新风暴把同一个 Bag RPC 重复塞进游戏连接队列。
@@ -81,6 +85,13 @@ function createDataProvider(deps) {
         const accountId = resolveAccountId(ref);
         const key = `illustrated:${String(accountId || '')}:${String(type)}:${String(level)}`;
         return callWorkerReadOnce(key, accountId, 'getIllustratedList', type, level);
+    }
+
+    /** 图鉴等级奖励列表（type: 1=作物，2=超变），带 30s 去重缓存 */
+    function getIllustratedLevels(ref, type) {
+        const accountId = resolveAccountId(ref);
+        const key = `illustrated-levels:${String(accountId || '')}:${String(type)}`;
+        return callWorkerReadOnce(key, accountId, 'getIllustratedLevels', Number(type) || 1);
     }
 
     return {
@@ -168,7 +179,7 @@ function createDataProvider(deps) {
         },
 
         // ========== Farm API ==========
-        getLands: (ref) => callWorkerApi(resolveAccountId(ref), 'getLands'),
+        getLands: (ref) => callWorkerApi(resolveAccountId(ref), 'getLands', true),
         getDiamondBalance: (ref) => callWorkerApi(resolveAccountId(ref), 'getDiamondBalance'),
         getSeeds: (ref) => callWorkerApi(resolveAccountId(ref), 'getSeeds'),
         getBag,
@@ -194,7 +205,30 @@ function createDataProvider(deps) {
         // ========== Friend API ==========
         getFriends: (ref, force = false) => callWorkerApi(resolveAccountId(ref), 'getFriends', force,
             force ? FRIEND_TIMEOUT : undefined),
+        /** 只读 Worker 内存缓存，不触发游戏协议请求；超时给短一些 */
+        getFriendsCache: (ref) => callWorkerApi(resolveAccountId(ref), 'getFriendsCache', undefined,
+            FRIEND_CACHE_TIMEOUT),
         clearFriendsCache: (ref) => callWorkerApi(resolveAccountId(ref), 'clearFriendsCache'),
+        // ========== 雨落成诗（天气活动） ==========
+        // 好友天气扫描会逐个进出好友农场，串行最多 5 个，给足超时。
+        getCurrentWeatherActivity: (ref) => callWorkerApi(resolveAccountId(ref), 'getCurrentWeatherActivity',
+            undefined, WEATHER_TIMEOUT),
+        getWeatherFriends: (ref) => callWorkerApi(resolveAccountId(ref), 'getWeatherFriends',
+            undefined, FRIEND_TIMEOUT),
+        scanWeatherFriends: (ref, gids) => callWorkerApi(resolveAccountId(ref), 'scanWeatherFriends', gids,
+            WEATHER_TIMEOUT),
+        exchangeWeatherCollectorBottle: (ref) => callWorkerApi(resolveAccountId(ref), 'exchangeWeatherCollectorBottle',
+            undefined, WEATHER_TIMEOUT),
+        useWeatherCollectorBottle: (ref, gid) => callWorkerApi(resolveAccountId(ref), 'useWeatherCollectorBottle', gid,
+            WEATHER_TIMEOUT),
+        useWeatherSummonBottle: (ref) => callWorkerApi(resolveAccountId(ref), 'useWeatherSummonBottle',
+            undefined, WEATHER_TIMEOUT),
+        useWeatherFrogBottle: (ref, gid) => callWorkerApi(resolveAccountId(ref), 'useWeatherFrogBottle', gid,
+            WEATHER_TIMEOUT),
+        useWeatherCloudBottle: (ref, gid, landId) => callWorkerApi(resolveAccountId(ref), 'useWeatherCloudBottle',
+            gid, landId, WEATHER_TIMEOUT),
+        advanceWeatherResearch: (ref, nodeId) => callWorkerApi(resolveAccountId(ref), 'advanceWeatherResearch', nodeId,
+            WEATHER_TIMEOUT),
         getInteractRecords: (ref) => callWorkerApi(resolveAccountId(ref), 'getInteractRecords'),
         getFriendLands: (ref, gid) => callWorkerApi(resolveAccountId(ref), 'getFriendLands', gid),
         doFriendOp: (ref, gid, op) => callWorkerApi(resolveAccountId(ref), 'doFriendOp', gid, op),
@@ -269,6 +303,7 @@ function createDataProvider(deps) {
 
         // ========== Illustrated ==========
         getIllustratedList,
+        getIllustratedLevels,
         claimIllustratedRewards: (ref, type) => callWorkerApi(resolveAccountId(ref), 'claimIllustratedRewards', type),
 
         // ========== Career ==========

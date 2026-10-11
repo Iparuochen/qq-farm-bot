@@ -318,8 +318,17 @@ message ActivityNode {
     StarRecordInfo star_record = 110;
     QixiBridgeInfo qixi_bridge = 112;
     QixiGiftInfo qixi_gift = 113;
+    // 雨落成诗：天气采集瓶配置。
+    // 上游该配置位于 field 105，但本地 105 已被 draw_info 占用（不同活动复用字段号），
+    // 因此改用未被占用的 121，避免两个活动互相覆盖导致解码错乱。
+    WeatherBottleConfig weather_bottle = 121;
+    // 天气任务/气象研究：保留本地既有结构（services/activity.js 的雨落成诗依赖
+    // weather_tasks.tasks[].{id,desc,target} 与 weather_research.progress），
+    // 上游结构改用未占用的 122/123，两者并存互不影响。
     WeatherTaskInfo weather_tasks = 117;
     WeatherResearchInfo weather_research = 118;
+    WeatherActivityTasks weather_tasks_v2 = 122;
+    WeatherResearchData weather_research_v2 = 123;
     ActivityBodyCharityFlower charity_flower = 116;
     ActivityBodyPetDiary pet_diary = 115;
     ActivityBodyWishSign wish_sign = 119;
@@ -451,7 +460,18 @@ message StarRecordClaimResult {
 message OperateReply {
     int64 id = 1;
     int32 cmd = 2;
+    // 上游把这两个字段命名为 activity_id / operate_type，字段号同为 1 / 2，
+    // protobufjs 按字段号解码，取首个声明名。weather-activity 通过 int64String
+    // 读取 reply.activity_id / reply.operate_type 时实际拿到的是 id / cmd 的同值。
     ActivityNode group = 3;
+    // 雨落成诗 Operate 返回值。上游 weather_exchange_result=101、
+    // weather_task_result=108、weather_research_result=140，
+    // 但本地这些字段号已被其它活动占用（不同活动复用字段号），
+    // 故统一改用未被占用的 141/142/143；通用奖励也用未占用的 144。
+    repeated corepb.Item rewards = 144;
+    ExchangeShopResult weather_exchange_result = 141;
+    WeatherTaskOperateResult weather_task_result = 142;
+    WeatherResearchOperateResult weather_research_result = 143;
     DrawResult draw_result = 108;
     QingmeiPreviewResult qingmei_preview = 113;
     QingmeiBrewResult qingmei_brew = 114;
@@ -531,3 +551,109 @@ message PetDiaryPouchSlot {
     int64 count = 3;       // 观察到 2
 }
 
+
+// ============================================================================
+// 雨落成诗（天气活动）协议补充
+// 与上游 core/src/proto/activitypb.proto 对齐。
+// 注意：本地 ActivityNode(==上游 ActivityData) 的字段 105 已被 draw_info 占用
+// （抽奖类活动复用同一字段号），上游 105 是 weather_bottle。
+// 因此这里给天气采集瓶配置选用字段号 121（本地未被占用），
+// 由 services/weather-activity.js 统一按 121 读取，避免与 draw_info 相互覆盖。
+// ============================================================================
+
+message ActivityItem {
+    int64 item_id = 1;
+    int64 count = 2;
+}
+
+message WeatherBottleReward {
+    int64 reward_id = 1;
+    ActivityItem reward = 3;
+    int64 status = 4;
+    string probability = 6;
+}
+
+message WeatherBottleConfig {
+    int64 field_3 = 3;
+    int64 field_4 = 4;
+    int64 collector_item_id = 5;
+    int64 collector_item_count = 6;
+    repeated WeatherBottleReward rewards = 8;
+    int64 field_9 = 9;
+}
+
+message WeatherActivityTask {
+    int64 task_id = 1;
+    int64 trigger_item_id = 2;
+    ActivityItem reward = 3;
+    string title = 4;
+    int64 daily_limit = 5;
+    int64 current = 6;
+}
+
+message WeatherActivityTasks {
+    repeated WeatherActivityTask tasks = 1;
+}
+
+message WeatherResearchNode {
+    int64 node_id = 1;
+    repeated int64 prerequisite_node_ids = 2 [packed = true];
+    int64 status = 3;
+    bool claimed = 4;
+    int64 field_5 = 5;
+    ActivityItem cost = 6;
+    ActivityItem reward = 7;
+    int64 field_8 = 8;
+    int64 field_9 = 9;
+}
+
+message WeatherResearchTrack {
+    int64 current_stage = 1;
+    repeated WeatherResearchNode nodes = 2;
+}
+
+message WeatherResearchData {
+    WeatherResearchTrack track = 1;
+}
+
+// 在好友雷雨现场使用天气采集瓶。
+// 实机协议 activity_id=2026070303、operate_type=9，好友 GID 位于 field 107 的 field 3；
+// 该链路不经过 ItemService.Use。
+message WeatherCollectOperateParams {
+    int64 host_gid = 3;
+}
+
+message CollectWeatherRequest {
+    int64 activity_id = 1;
+    int64 operate_type = 2;
+    WeatherCollectOperateParams weather_collect_operate = 107;
+}
+
+// 推进一个气象研究节点。实机协议 operate_type=40，选择器位于 field 140。
+message WeatherResearchOperateParams {
+    int64 node_id = 1;
+}
+
+message AdvanceWeatherResearchRequest {
+    int64 activity_id = 1;
+    int64 operate_type = 2;
+    WeatherResearchOperateParams weather_research_operate = 140;
+}
+
+// OperateReply 的天气相关返回值：
+// 兑换天气采集瓶(field 101)、天气任务(field 108)、气象研究(field 140)。
+message ExchangeShopResult {
+    repeated ActivityItem rewards = 1;
+}
+
+message WeatherTaskRewardLink {
+    repeated ActivityItem rewards = 1;
+}
+
+message WeatherTaskOperateResult {
+    WeatherTaskRewardLink task_reward = 1;
+}
+
+message WeatherResearchOperateResult {
+    repeated ActivityItem rewards = 1;
+}

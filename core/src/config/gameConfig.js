@@ -69,6 +69,13 @@ const staticItemImageMap = new Map([
 // 变异效果配置
 let mutantEffectConfig = null;
 const mutantEffectMap = new Map();       // mutantId → mutantEffect
+
+let illustratedConfig = null;
+// param(即果实/种子 ID) → 图鉴配置条目，用于推导展示类型与排序
+const illustratedItemMap = new Map();
+// 图鉴属性加成配置（BuffCfg.json，source_type=超变升级）
+let buffConfig = null;
+const buffConfigMap = new Map();         // id → buffConfig
 const mutantEffectByIconMap = new Map(); // icon → mutantEffect
 
 /** 加载所有游戏配置文件 */
@@ -309,6 +316,86 @@ function loadConfigs() {
     } catch (err) {
         console.warn('[配置] 加载 MutantEffect.json 失败:', err.message);
     }
+
+    // 7. 加载图鉴配置（param → type/sort，用于图鉴分组与排序）
+    try {
+        const illustratedPath = path.join(basePath, 'Illustrated.json');
+        if (fs.existsSync(illustratedPath)) {
+            illustratedConfig = JSON.parse(fs.readFileSync(illustratedPath, 'utf8'));
+            illustratedItemMap.clear();
+            for (const entry of illustratedConfig || []) {
+                const param = Number(entry && entry.param) || 0;
+                if (param > 0) illustratedItemMap.set(param, entry);
+            }
+            console.warn(`[配置] 已加载图鉴配置 (${  illustratedItemMap.size  } 项)`);
+        }
+    } catch (err) {
+        console.warn('[配置] 加载 Illustrated.json 失败:', err.message);
+    }
+
+    // 8. 加载图鉴属性加成配置（超变图鉴等级加成）
+    try {
+        const buffPath = path.join(basePath, 'BuffCfg.json');
+        if (fs.existsSync(buffPath)) {
+            buffConfig = JSON.parse(fs.readFileSync(buffPath, 'utf8'));
+            buffConfigMap.clear();
+            for (const entry of buffConfig || []) {
+                const id = Number(entry && entry.id) || 0;
+                if (id > 0) buffConfigMap.set(id, entry);
+            }
+            console.warn(`[配置] 已加载图鉴加成配置 (${  buffConfigMap.size  } 项)`);
+        }
+    } catch (err) {
+        console.warn('[配置] 加载 BuffCfg.json 失败:', err.message);
+    }
+}
+
+/**
+ * 按果实/种子 ID 查图鉴配置中的展示类型（普通果实 / 黄金果实 / 装扮果实 / 活动果实）
+ */
+function getIllustratedTypeByParam(param) {
+    const entry = illustratedItemMap.get(Number(param) || 0);
+    return String((entry && entry.type) || '');
+}
+
+/** 按果实/种子 ID 查图鉴配置中的排序值 */
+function getIllustratedSortByParam(param) {
+    const entry = illustratedItemMap.get(Number(param) || 0);
+    return Number(entry && entry.sort) || 0;
+}
+
+/** 图鉴加成条目标准化：value>10 视为概率（千分之一），否则视为数量加成 */
+function illustratedBuffDto(entry) {
+    const value = Number(entry && entry.attr_value) || 0;
+    return {
+        id: Number(entry && entry.id) || 0,
+        level: Number(entry && entry.source_param) || 0,
+        name: String((entry && entry.attr_id) || ''),
+        value,
+        valueType: value > 10 ? 'probability' : 'quantity',
+    };
+}
+
+/** 取「等级 ≤ 当前图鉴等级」的最新一条加成（按属性名去重） */
+function getIllustratedBuffsByLevel(level) {
+    const maxLevel = Math.max(0, Number(level) || 0);
+    const latestByAttribute = new Map();
+    [...buffConfigMap.values()]
+        .filter(entry => entry && entry.source_type === '超变升级' && Number(entry.source_param) <= maxLevel)
+        .sort((a, b) => Number(a.source_param) - Number(b.source_param))
+        .forEach((entry) => {
+            const name = String(entry.attr_id || '');
+            if (name) latestByAttribute.set(name, illustratedBuffDto(entry));
+        });
+    return [...latestByAttribute.values()].sort((a, b) => a.level - b.level);
+}
+
+/** 取全部超变图鉴等级加成（按等级升序） */
+function getIllustratedBuffs() {
+    return [...buffConfigMap.values()]
+        .filter(entry => entry && entry.source_type === '超变升级')
+        .sort((a, b) => Number(a.source_param) - Number(b.source_param))
+        .map(illustratedBuffDto);
 }
 
 /** 获取等级经验表 */
@@ -753,5 +840,9 @@ module.exports = {
     getMutantEffectById,
     getMutantEffectByIcon,
     getAllMutantEffects,
-    getMutantEffectsByIds
+    getMutantEffectsByIds,
+    getIllustratedTypeByParam,
+    getIllustratedSortByParam,
+    getIllustratedBuffsByLevel,
+    getIllustratedBuffs
 };

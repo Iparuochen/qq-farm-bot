@@ -17,6 +17,15 @@ function registerAdminPetRoutes({ app, provider, store, getAccountIdFromRequest,
   route('post', '/api/dog/withdraw', id => provider.withdrawDog(id));
   route('post', '/api/dog/feed', (id, body) => provider.feedDog(id, Number(body.foodId), Number(body.count) || 1));
   route('get', '/api/dog/protect-logs', id => provider.getProtectLogs(id));
+
+  // 与上游命名对齐：宠物面板调用 /api/pets*，这里映射到本仓库已有的 provider 方法。
+  route('get', '/api/pets', id => provider.getPetOverview(id));
+  route('get', '/api/pets/protect-logs', id => provider.getProtectLogs(id));
+  route('post', '/api/pets/activate', (id, body) => provider.activateDog(id, Number(body.dogId)));
+  route('post', '/api/pets/deploy', (id, body) => provider.deployDog(id, Number(body.dogId)));
+  route('post', '/api/pets/withdraw', id => provider.withdrawDog(id));
+  route('post', '/api/pets/food/use', (id, body) =>
+    provider.feedDog(id, Number(body.itemId ?? body.foodId) || 0, Math.max(1, Math.trunc(Number(body.count) || 1))));
   app.get('/api/dog/capital-mode', (req, res) => {
     const id = accountIdFor(req, res); if (!id) return;
     res.json({ ok: true, data: store.getCapitalMode(id) });

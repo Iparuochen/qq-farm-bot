@@ -30,20 +30,28 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id) {
-          if (id.includes('node_modules')) {
-            if (id.includes('vue') || id.includes('pinia') || id.includes('vue-router') || id.includes('@vueuse')) {
-              return 'vendor-vue'
-            }
-            if (id.includes('axios')) {
-              return 'vendor-axios'
-            }
-            // Split other large dependencies if needed
-            if (id.includes('echarts') || id.includes('zrender')) {
-              return 'vendor-echarts'
-            }
-            // Default vendor chunk
-            return 'vendor'
+          if (!id.includes('node_modules'))
+            return
+          const norm = id.replace(/\\/g, '/')
+          // naive-ui 及其依赖链单独成组。
+          // 注意不能用 includes('vue') 这类模糊匹配：vueuc 名字含 vue 会被误分到
+          // vendor-vue，把 naive-ui 的依赖劈成两半形成循环依赖，运行时报
+          // "Cannot access 'isFunction' before initialization"。
+          if (/node_modules\/(naive-ui|vueuc|seemly|css-render|@css-render|vdirs|vooks|treemate|evtd|date-fns|date-fns-tz|async-validator|highlight\.js|lodash|lodash-es|@juggle)\//.test(norm)) {
+            return 'vendor-naive'
           }
+          if (/node_modules\/(@vue|vue|pinia|vue-router|@vueuse)\//.test(norm)) {
+            return 'vendor-vue'
+          }
+          if (/node_modules\/axios\//.test(norm)) {
+            return 'vendor-axios'
+          }
+          // Split other large dependencies if needed
+          if (/node_modules\/(echarts|zrender)\//.test(norm)) {
+            return 'vendor-echarts'
+          }
+          // Default vendor chunk
+          return 'vendor'
         },
       },
     },

@@ -1693,7 +1693,7 @@ async function handleApiCall(msg) {
     try {
         switch (method) {
             case 'getLands':
-                result = await getLandsDetail();
+                result = await getLandsDetail(args[0] === true);
                 try {
                     const { getOwnWeatherStatus } = require('../services/activity');
                     result.weather = await getOwnWeatherStatus();
@@ -1707,6 +1707,10 @@ async function handleApiCall(msg) {
             case 'getFriends':
                 result = await getFriendsList(args[0] === true);
                 break;
+            // 仅读取 Worker 内存中的好友列表缓存，不触发任何游戏协议请求（好友页秒开用）。
+            case 'getFriendsCache':
+                result = require('../services/friend').getFriendsListCache() || [];
+                break;
             case 'getDiamondBalance':
                 result = await require('../services/pay').getDiamondBalance();
                 getUserState().diamond = Math.max(0, Number(result) || 0);
@@ -1714,6 +1718,34 @@ async function handleApiCall(msg) {
             case 'clearFriendsCache':
                 require('../services/friend').clearFriendsListCache();
                 result = { ok: true };
+                break;
+            // 雨落成诗（天气活动）。懒加载，避免未使用该活动时也拉起依赖链。
+            case 'getCurrentWeatherActivity':
+                result = await require('../services/weather-activity').getCurrentWeatherActivity();
+                break;
+            case 'getWeatherFriends':
+                result = await require('../services/weather-activity').getWeatherFriends();
+                break;
+            case 'scanWeatherFriends':
+                result = await require('../services/weather-activity').scanWeatherFriends(args[0]);
+                break;
+            case 'exchangeWeatherCollectorBottle':
+                result = await require('../services/weather-activity').exchangeWeatherCollectorBottle();
+                break;
+            case 'useWeatherCollectorBottle':
+                result = await require('../services/weather-activity').useWeatherCollectorBottle(args[0]);
+                break;
+            case 'useWeatherSummonBottle':
+                result = await require('../services/weather-activity').useWeatherSummonBottle();
+                break;
+            case 'useWeatherFrogBottle':
+                result = await require('../services/weather-activity').useWeatherFrogBottle(args[0]);
+                break;
+            case 'useWeatherCloudBottle':
+                result = await require('../services/weather-activity').useWeatherCloudBottle(args[0], args[1]);
+                break;
+            case 'advanceWeatherResearch':
+                result = await require('../services/weather-activity').advanceWeatherResearch(args[0]);
                 break;
             case 'getInteractRecords':
                 result = await getInteractRecords();
@@ -2054,6 +2086,11 @@ async function handleApiCall(msg) {
                 result = await getIllustratedListV2(args[0], args[1]);
                 break;
             }
+            case 'getIllustratedLevels': {
+                const { getIllustratedLevelsV2, normalizeIllustratedLevels } = require('../services/illustrated');
+                result = normalizeIllustratedLevels(await getIllustratedLevelsV2(args[0]));
+                break;
+            }
             case 'claimIllustratedRewards': {
                 const { claimAllRewardsV2 } = require('../services/illustrated');
                 result = await claimAllRewardsV2(args[0]);
@@ -2272,6 +2309,16 @@ function syncStatus() {
     };
     stats.automation = getAutomation();
     stats.levelProgress = levelProgress;
+    // 按已种植作物预测升级时间（依赖最近一次进农场缓存的 lands 快照）。
+    // 本项目没有上游那种「农场静默时段」开关，quiet 直接传 false：
+    // 收获是否由人工决定，已由 automation.farm 决定（见 level-forecast 内的 automatic 字段）。
+    stats.levelForecast = require('../services/level-forecast').getLevelForecast(
+        userState,
+        levelProgress,
+        stats,
+        stats.automation,
+        false,
+    );
     stats.configRevision = appliedConfigRevision;
 
     const stableStats = { ...stats };

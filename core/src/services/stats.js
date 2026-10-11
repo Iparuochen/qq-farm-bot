@@ -82,6 +82,10 @@ const session = {
   lastGoldGain: 0
 };
 
+// 本次会话（账号登录至今）的起点。用于给面板提供 sessionElapsedSeconds，
+// 供 level-forecast 计算「每小时经验」的历史均值。
+let sessionStartedAt = Date.now();
+
 let currentAccountId = null;
 let saveTimer = null;
 
@@ -192,6 +196,7 @@ function initStatsWithPersistence(accountId, gold, exp, coupon = 0) {
   initialState.gold = null;
   initialState.exp = null;
   initialState.coupon = null;
+  sessionStartedAt = Date.now();
   session.goldGained = 0;
   session.expGained = 0;
   session.couponGained = 0;
@@ -261,6 +266,7 @@ function setInitialValues(gold, exp, coupon = 0) {
 
 /** 重置会话增益 */
 function resetSessionGains() {
+  sessionStartedAt = Date.now();
   session.goldGained = 0;
   session.expGained = 0;
   session.couponGained = 0;
@@ -335,6 +341,9 @@ function getStats(farmUser, userState, connected, limits) {
     sessionExpGained: session.expGained,
     sessionGoldGained: session.goldGained,
     sessionCouponGained: session.couponGained,
+    // 本次会话已持续的秒数。level-forecast 用它把 sessionExpGained
+    // 折算成「每小时经验」，样本太小时（<60s）会主动弃用历史均值。
+    sessionElapsedSeconds: Math.max(0, (Date.now() - sessionStartedAt) / 1000),
     lastExpGain: session.lastExpGain,
     lastGoldGain: session.lastGoldGain,
     limits

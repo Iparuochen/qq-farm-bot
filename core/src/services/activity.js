@@ -659,11 +659,12 @@ function normalizeRainPoemItem(item, fallbackId = 0) {
 }
 
 function normalizeWeatherStatus(weather, nowSeconds = Math.floor(Date.now() / 1000)) {
-  // 字段 1 是雷雨阶段而非天气 ID。兼容修复前按 weather_id 解码的对象，
-  // 避免测试夹具或运行中的旧对象在热更新期间被误判。
-  const type = toNum(weather?.type ?? weather?.weather_id);
+  // weatherpb.WeatherStatus 的字段 1/3 已统一为上游命名 weather_type / begin_time，
+  // 这里同时兼容旧的 type / start_time（热更新期间或旧夹具可能仍是旧对象）。
+  // 字段 1 是雷雨阶段而非天气 ID。
+  const type = toNum(weather?.weather_type ?? weather?.type ?? weather?.weather_id);
   const status = toNum(weather?.status);
-  const startTime = toNum(weather?.start_time);
+  const startTime = toNum(weather?.begin_time ?? weather?.start_time);
   const endTime = toNum(weather?.end_time);
   return {
     type, status, startTime, endTime,
@@ -1194,20 +1195,22 @@ async function reportQingmeiShareForDouble() {
     throw new Error('当前不可分享，无法执行青梅酿售卖翻倍');
   }
 
+  // 青梅酿活动分享参数（对照上游 services/activity-center/qingmei.ts）
+  const QINGMEI_SHARE_SOURCE = 11;
+  const QINGMEI_SHARE_SCENE = 215;
   const reportRequest = types.ReportShareRequest.encode(
-    types.ReportShareRequest.create({ shared: true })
+    types.ReportShareRequest.create({
+      field_1: QINGMEI_SHARE_SOURCE,
+      field_4: QINGMEI_SHARE_SCENE,
+    })
   ).finish();
-  const { body: reportBody } = await sendMsgAsync('gamepb.sharepb.ShareService', 'ReportShare', reportRequest);
-  const reportResult = types.ReportShareReply.decode(reportBody);
-
-  if (reportResult && Object.hasOwn(reportResult, 'success') && !reportResult.success) {
-    throw new Error('青梅酿分享上报失败');
-  }
+  // 回复字段 1 是 bytes result，没有 success 语义；请求不抛异常即视为成功。
+  await sendMsgAsync('gamepb.sharepb.ShareService', 'ReportShare', reportRequest);
 
   return {
     canShare: !!checkResult?.can_share,
     shared: true,
-    success: reportResult?.success !== false,
+    success: true,
   };
 }
 

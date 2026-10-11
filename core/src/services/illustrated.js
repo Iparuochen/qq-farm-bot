@@ -10,6 +10,7 @@ const { types } = require('../utils/proto');
 const { sendMsgAsync } = require('../utils/network');
 const { toNum } = require('../utils/utils');
 const { createModuleLogger } = require('./logger');
+const { getItemById, getItemImageById } = require('../config/gameConfig');
 
 const logger = createModuleLogger('illustrated');
 
@@ -241,6 +242,62 @@ async function getIllustratedListV2(refresh = false, illustratedType = 1) {
 }
 
 /**
+ * 获取图鉴等级奖励列表
+ * @param {number} illustratedType - 图鉴类型，1=作物，2=超变
+ */
+async function getIllustratedLevelsV2(illustratedType = 1) {
+  const request = types.GetIllustratedLevelListV2Request.encode(
+    types.GetIllustratedLevelListV2Request.create({
+      type: Number(illustratedType) || 1,
+    })
+  ).finish();
+
+  const { body } = await sendMsgAsync(
+    'gamepb.illustratedpb.IllustratedService',
+    'GetIllustratedLevelListV2',
+    request
+  );
+
+  return types.GetIllustratedLevelListV2Reply.decode(body);
+}
+
+/**
+ * 图鉴奖励条目标准化（item_id + count → 带名称与图标的 DTO）
+ */
+function rewardDto(input) {
+  const itemId = toNum(input && (input.item_id ?? input.id));
+  const count = Math.max(0, toNum(input && input.count));
+  if (!itemId) return null;
+  const item = getItemById(itemId);
+  return {
+    itemId,
+    count,
+    name: String((item && item.name) || `物品${itemId}`),
+    image: getItemImageById(itemId),
+  };
+}
+
+/**
+ * 图鉴等级奖励列表标准化，供前端「详情」弹窗展示等级进度与奖励
+ */
+function normalizeIllustratedLevels(reply) {
+  const levels = (Array.isArray(reply && reply.levels) ? reply.levels : []).map((entry) => ({
+    level: toNum(entry && entry.level),
+    progress: Math.max(0, toNum(entry && entry.progress)),
+    claimed: entry && entry.claimed === true,
+    rewards: (Array.isArray(entry && entry.rewards) ? entry.rewards : [])
+      .map(rewardDto)
+      .filter(Boolean),
+  }));
+
+  return {
+    level: toNum(reply && reply.level),
+    progress: Math.max(0, toNum(reply && reply.progress)),
+    levels,
+  };
+}
+
+/**
  * 领取所有图鉴奖励
  */
 async function claimAllRewardsV2(onlyClaimable = true) {
@@ -284,6 +341,8 @@ function normalizeIllustratedCategory(value) {
 
 module.exports = {
   getIllustratedListV2,
+  getIllustratedLevelsV2,
+  normalizeIllustratedLevels,
   claimAllRewardsV2,
   summarizeIllustratedItems,
   normalizeIllustratedCategory,

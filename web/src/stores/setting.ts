@@ -63,6 +63,7 @@ export interface AutomationConfig {
   friend_help_exp_limit?: boolean
   golden_bug_clear?: boolean
   skip_own_weed_bug?: boolean
+  show_manual_fertilizer?: boolean
 }
 
 export interface IntervalsConfig {

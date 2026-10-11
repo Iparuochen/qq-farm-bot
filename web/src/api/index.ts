@@ -10,6 +10,31 @@ const api = axios.create({
   timeout: 20000,
 })
 
+/** 去掉网关错误里冗长的 `服务.方法 错误: code=123 ...` 前缀，只保留可读信息。 */
+export function normalizeApiErrorMessage(raw: unknown): string {
+  const text = String(raw || '').trim()
+  if (!text)
+    return ''
+
+  const codeMatch = text.match(/\bcode=\d+\b\s*(.*)$/)
+  const codeIndex = codeMatch?.index ?? -1
+  if (codeMatch?.[1] && codeIndex >= 0 && text.slice(0, codeIndex).includes('.'))
+    return codeMatch[1].trim()
+  return text
+}
+
+export function getApiErrorMessage(error: unknown, fallback = '请求失败'): string {
+  const candidate = error as any
+  const data = candidate?.response?.data
+    || (candidate && typeof candidate === 'object' ? candidate : null)
+  const raw = data?.errorMessage
+    || data?.error
+    || data?.message
+    || candidate?.message
+    || (typeof error === 'string' ? error : '')
+  return normalizeApiErrorMessage(raw) || fallback
+}
+
 let lastNetworkToastAt = 0
 function showNetworkToast(message: string) {
   const now = Date.now()

@@ -1,0 +1,2387 @@
+From 264a658a8a68f0d510a6b8e231ecbecb2fedb459 Mon Sep 17 00:00:00 2001
+From: xxxscarlxrd404 <136799429@qq.com>
+Date: Sat, 10 Oct 2026 04:47:51 +0800
+Subject: [PATCH 1/2] =?UTF-8?q?feat:=20=E5=90=8C=E6=AD=A5=E4=B8=8A?=
+ =?UTF-8?q?=E6=B8=B8=E5=86=9C=E5=9C=BA=E7=89=B9=E6=AE=8A=E4=BA=92=E5=8A=A8?=
+ =?UTF-8?q?=E9=81=93=E5=85=B7=E8=83=BD=E5=8A=9B=EF=BC=88=E4=B8=AA=E4=BA=BA?=
+ =?UTF-8?q?=E9=A1=B5=E4=B8=8E=E5=A5=BD=E5=8F=8B=E9=A1=B5=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+从 muyuewang/qq-farm-bot-li 移植特殊互动道具（种草、黄金虫、闪电变异瓶等）
+的完整链路，好友农场与自己农场共用。
+
+后端 core
+- 新增 services/friend-interaction-items.js：库存发现、地块目标筛选、
+  按地块编号顺序批量使用，同农场会话内串行化避免并发 Enter/Leave
+- 新增 config/sell-conditions.js 与 services/activity-windows.js，
+  为道具售卖条件判定提供活动窗口与过期时间上下文
+- farm-land-analyzer 补充 buildLandDetail、getPlantInteractionEffects、
+  hasOwnerCleanableInteraction 等土地/互动效果解析
+- itempb.proto 补齐 UseReply 的 land / land_reward / social_reward 字段，
+  便于回写使用后地块状态与奖励
+- worker RPC、data-provider 与好友/农场 HTTP 路由接入（含独立超时）
+
+前端 web
+- 新增 utils/interaction-item-rules.ts 与 FriendsInteractionPanel 组件，
+  不可用地块给出具体原因（已生效、成熟不可用、仅限 1×1 作物等）
+- friend store 增加互动道具库存与批量/整场使用动作；farm store 增加
+  自己农场互动道具能力
+- 好友页展开好友后可使用互动道具；个人页新增互动道具页签，
+  并改为已访问页签保持挂载，切回时保留滚动位置与加载状态
+
+验证：core 393 项测试通过数与改动前一致（无新增失败），
+UseRequest 编解码往返正常，web 类型检查与生产构建通过。
+---
+ core/src/config/sell-conditions.js            |  60 ++
+ .../admin-farm-operation-routes.js            |  40 +
+ core/src/controllers/admin-friend-routes.js   |  48 ++
+ core/src/core/worker.js                       |  18 +
+ core/src/proto/itempb.proto                   |  15 +
+ core/src/runtime/data-provider.js             |  14 +
+ core/src/services/activity-windows.js         | 107 +++
+ core/src/services/farm-land-analyzer.js       | 329 +++++++-
+ core/src/services/friend-interaction-items.js | 745 ++++++++++++++++++
+ .../components/friends/FriendsFriendList.vue  |  19 +-
+ .../friends/FriendsInteractionPanel.vue       | 198 +++++
+ web/src/stores/farm.ts                        |  57 ++
+ web/src/stores/friend.ts                      | 158 ++++
+ web/src/utils/interaction-item-rules.ts       |  35 +
+ web/src/views/Friends.vue                     |  47 ++
+ web/src/views/Personal.vue                    | 137 ++--
+ 16 files changed, 1978 insertions(+), 49 deletions(-)
+ create mode 100644 core/src/config/sell-conditions.js
+ create mode 100644 core/src/services/activity-windows.js
+ create mode 100644 core/src/services/friend-interaction-items.js
+ create mode 100644 web/src/components/friends/FriendsInteractionPanel.vue
+ create mode 100644 web/src/utils/interaction-item-rules.ts
+
+diff --git a/core/src/config/sell-conditions.js b/core/src/config/sell-conditions.js
+new file mode 100644
+index 0000000..11bc44f
+--- /dev/null
++++ b/core/src/config/sell-conditions.js
+@@ -0,0 +1,60 @@
++// 物品售卖条件解析：判断是否已满足「活动结束/道具过期」一类的售卖前置条件。
++// 条件串形如 `活动结束后:20260901;道具过期后`，分号分隔，全部满足才算满足。
++
++/**
++ * @typedef {{ nowSec: number, expireTime?: number,
++ *   activityWindows?: Map<string, {id: string, name?: string, beginTime: number, endTime: number}>,
++ *   activityWindowsLoaded?: boolean }} SellConditionContext
++ */
++
++function parseSellConditions(condition) {
++  return String(condition || '')
++    .split(';')
++    .map(part => part.trim())
++    .filter(Boolean)
++    .map((part) => {
++      const separator = part.indexOf(':')
++      if (separator < 0) return { type: part, value: '' }
++      return {
++        type: part.slice(0, separator).trim(),
++        value: part.slice(separator + 1).trim(),
++      }
++    })
++}
++
++function isActivityEnded(window, nowSec) {
++  return !window || window.endTime <= nowSec
++}
++
++function isActivityActive(window, nowSec) {
++  return !!window && window.beginTime <= nowSec && nowSec <= window.endTime
++}
++
++function isSingleSellConditionSatisfied(condition, context) {
++  const nowSec = Number(context?.nowSec) || 0
++  if (condition.type === '道具过期后') {
++    const expireTime = Number(context?.expireTime) || 0
++    return expireTime > 0 && nowSec >= expireTime
++  }
++
++  if (!context?.activityWindowsLoaded || !condition.value) return false
++  const window = context.activityWindows instanceof Map
++    ? context.activityWindows.get(condition.value)
++    : null
++  if (condition.type === '活动结束后') return isActivityEnded(window, nowSec)
++  if (condition.type === '活动结束前') return !isActivityEnded(window, nowSec)
++  if (condition.type === '活动区间外') return !isActivityActive(window, nowSec)
++  return false
++}
++
++// 条件为空字符串时视为「无条件」，这里要求至少解析出一个条件才可能满足。
++function isSellConditionSatisfied(condition, context) {
++  const conditions = parseSellConditions(condition)
++  return conditions.length > 0
++    && conditions.every(entry => isSingleSellConditionSatisfied(entry, context || {}))
++}
++
++module.exports = {
++  parseSellConditions,
++  isSellConditionSatisfied,
++}
+diff --git a/core/src/controllers/admin-farm-operation-routes.js b/core/src/controllers/admin-farm-operation-routes.js
+index 5de26ea..48d140f 100644
+--- a/core/src/controllers/admin-farm-operation-routes.js
++++ b/core/src/controllers/admin-farm-operation-routes.js
+@@ -110,6 +110,46 @@ function registerAdminFarmOperationRoutes({
+       sendProviderError(res, error);
+     }
+   });
++
++  // 背包中当前可对自己农场使用的特殊互动道具。
++  app.get("/api/farm/interaction-items", async (req, res) => {
++    const accountId = requireAccountAccess({
++      req,
++      res,
++      getAccountIdFromRequest,
++      canAccessAccount,
++    });
++    if (!accountId) return;
++
++    try {
++      const data = await provider.getSelfInteractionItems(accountId);
++      res.json({ ok: true, data });
++    } catch (error) {
++      sendProviderError(res, error);
++    }
++  });
++
++  // 在自己农场按地块编号顺序使用特殊互动道具。
++  app.post("/api/farm/interaction-items/use-batch", async (req, res) => {
++    const accountId = requireAccountAccess({
++      req,
++      res,
++      getAccountIdFromRequest,
++      canAccessAccount,
++    });
++    if (!accountId) return;
++
++    try {
++      const data = await provider.useSelfInteractionItemBatch(
++        accountId,
++        (req.body || {}).itemId,
++        (req.body || {}).landIds,
++      );
++      res.json({ ok: true, data });
++    } catch (error) {
++      sendProviderError(res, error);
++    }
++  });
+ }
+ 
+ module.exports = { registerAdminFarmOperationRoutes };
+diff --git a/core/src/controllers/admin-friend-routes.js b/core/src/controllers/admin-friend-routes.js
+index c16a8a5..98b1fd7 100644
+--- a/core/src/controllers/admin-friend-routes.js
++++ b/core/src/controllers/admin-friend-routes.js
+@@ -143,6 +143,54 @@ function registerAdminFriendRoutes({
+     }
+   });
+ 
++  // 背包中当前可用于好友农场/土地的特殊互动道具。
++  app.get("/api/friend-interaction-items", async (req, res) => {
++    const accountId = getAccountOrRespond(req, res, access);
++    if (!accountId) return;
++
++    try {
++      const data = await provider.getFriendInteractionItems(accountId);
++      res.json({ ok: true, data });
++    } catch (error) {
++      sendProviderError(res, error);
++    }
++  });
++
++  // 在同一次好友访问会话内，按地块编号顺序使用特殊互动道具。
++  app.post("/api/friend/:gid/interaction-items/use-batch", async (req, res) => {
++    const accountId = getAccountOrRespond(req, res, access);
++    if (!accountId) return;
++
++    try {
++      const data = await provider.useFriendInteractionItemBatch(
++        accountId,
++        req.params.gid,
++        (req.body || {}).itemId,
++        (req.body || {}).landIds,
++      );
++      res.json({ ok: true, data });
++    } catch (error) {
++      sendProviderError(res, error);
++    }
++  });
++
++  // 对指定好友农场使用不需要地块目标的特殊互动道具（例如青蛙使坏瓶）。
++  app.post("/api/friend/:gid/interaction-items/use-farm", async (req, res) => {
++    const accountId = getAccountOrRespond(req, res, access);
++    if (!accountId) return;
++
++    try {
++      const data = await provider.useFriendFarmInteractionItem(
++        accountId,
++        req.params.gid,
++        (req.body || {}).itemId,
++      );
++      res.json({ ok: true, data });
++    } catch (error) {
++      sendProviderError(res, error);
++    }
++  });
++
+   app.post("/api/friend/:gid/op", async (req, res) => {
+     const accountId = getAccountOrRespond(req, res, access);
+     if (!accountId) return;
+diff --git a/core/src/core/worker.js b/core/src/core/worker.js
+index 1774032..9f8e28c 100644
+--- a/core/src/core/worker.js
++++ b/core/src/core/worker.js
+@@ -1739,6 +1739,24 @@ async function handleApiCall(msg) {
+             case 'delFriend':
+                 result = await delFriend(args[0]);
+                 break;
++            case 'getFriendInteractionItems':
++                result = await require('../services/friend-interaction-items').getFriendInteractionItems();
++                break;
++            case 'useFriendInteractionItemBatch':
++                result = await require('../services/friend-interaction-items')
++                    .useFriendInteractionItemBatch(args[0], args[1], args[2]);
++                break;
++            case 'useFriendFarmInteractionItem':
++                result = await require('../services/friend-interaction-items')
++                    .useFriendFarmInteractionItem(args[0], args[1]);
++                break;
++            case 'getSelfInteractionItems':
++                result = await require('../services/friend-interaction-items').getSelfInteractionItems();
++                break;
++            case 'useSelfInteractionItemBatch':
++                result = await require('../services/friend-interaction-items')
++                    .useSelfInteractionItemBatch(args[0], args[1]);
++                break;
+             case 'getSeeds':
+                 result = await getAvailableSeeds();
+                 break;
+diff --git a/core/src/proto/itempb.proto b/core/src/proto/itempb.proto
+index 86eebb2..b9fb3ea 100644
+--- a/core/src/proto/itempb.proto
++++ b/core/src/proto/itempb.proto
+@@ -3,6 +3,7 @@ syntax = "proto3";
+ package gamepb.itempb;
+ 
+ import "corepb.proto";
++import "plantpb.proto";
+ 
+ // ============ 背包/仓库 ============
+ 
+@@ -40,6 +41,20 @@ message UseTarget {
+ message UseReply {
+     repeated corepb.Item used_items = 1;
+     repeated corepb.Item items = 2;
++    gamepb.plantpb.LandInfo land = 4;
++    UseLandReward land_reward = 5;
++    UseSocialReward social_reward = 6;
++}
++
++message UseLandReward {
++    int64 land_id = 1;
++    repeated corepb.Item items = 2;
++}
++
++// 青蛙使坏瓶等整座好友农场道具的奖励回包。
++message UseSocialReward {
++    int64 item_id = 1;
++    repeated corepb.Item items = 2;
+ }
+ 
+ // ============ 批量使用物品 ============
+diff --git a/core/src/runtime/data-provider.js b/core/src/runtime/data-provider.js
+index c47cf76..593ff97 100644
+--- a/core/src/runtime/data-provider.js
++++ b/core/src/runtime/data-provider.js
+@@ -52,6 +52,8 @@ function createDataProvider(deps) {
+     const FRIEND_TIMEOUT = { _timeoutMs: 180000 };       // 3分钟
+     const SYNC_TIMEOUT = { _timeoutMs: 180000 };          // 3分钟
+     const DOG_INFO_TIMEOUT = { _timeoutMs: 600000 };     // 10分钟
++    // 互动道具批量使用会进入农场会话并逐块提交，最多 48 块地，给足超时。
++    const INTERACTION_TIMEOUT = { _timeoutMs: 300000 };  // 5分钟
+ 
+     // 浏览器整页刷新后，旧 HTTP 请求仍会在服务端继续执行。按账号合并并发的
+     // 背包只读请求，避免刷新风暴把同一个 Bag RPC 重复塞进游戏连接队列。
+@@ -201,6 +203,18 @@ function createDataProvider(deps) {
+         syncFriendsFromGids: (ref, gids) => callWorkerApi(resolveAccountId(ref), 'syncFriendsFromGids', gids, SYNC_TIMEOUT),
+         fetchFriendsDogInfo: (ref) => callWorkerApi(resolveAccountId(ref), 'fetchFriendsDogInfo', DOG_INFO_TIMEOUT),
+         delFriend: (ref, gid) => callWorkerApi(resolveAccountId(ref), 'delFriend', gid),
++        // ========== 特殊互动道具 ==========
++        getFriendInteractionItems: (ref) => callWorkerApi(resolveAccountId(ref), 'getFriendInteractionItems'),
++        useFriendInteractionItemBatch: (ref, gid, itemId, landIds) => callWorkerApi(
++            resolveAccountId(ref), 'useFriendInteractionItemBatch', gid, itemId, landIds, INTERACTION_TIMEOUT
++        ),
++        useFriendFarmInteractionItem: (ref, gid, itemId) => callWorkerApi(
++            resolveAccountId(ref), 'useFriendFarmInteractionItem', gid, itemId, INTERACTION_TIMEOUT
++        ),
++        getSelfInteractionItems: (ref) => callWorkerApi(resolveAccountId(ref), 'getSelfInteractionItems'),
++        useSelfInteractionItemBatch: (ref, itemId, landIds) => callWorkerApi(
++            resolveAccountId(ref), 'useSelfInteractionItemBatch', itemId, landIds, INTERACTION_TIMEOUT
++        ),
+ 
+         // ========== 仓库 ==========
+         useItem: (ref, itemId, count, uid) => callWorkerApi(resolveAccountId(ref), 'useItem', itemId, count, uid),
+diff --git a/core/src/services/activity-windows.js b/core/src/services/activity-windows.js
+new file mode 100644
+index 0000000..3093a52
+--- /dev/null
++++ b/core/src/services/activity-windows.js
+@@ -0,0 +1,107 @@
++// 活动开放时间窗缓存：为物品售卖条件判定提供「活动是否已结束」的上下文。
++// 数据来自 gamepb.activitypb.ActivityService/List，5 分钟内复用缓存。
++
++const { sendMsgAsync, networkEvents } = require('../utils/network')
++const { types } = require('../utils/proto')
++const { getServerTimeSec, logWarn, toNum } = require('../utils/utils')
++
++const CACHE_TTL_MS = 5 * 60 * 1000
++const RETRY_LOG_INTERVAL_MS = 60 * 1000
++
++let activityWindows = new Map()
++let loadedAt = 0
++let pendingRefresh = null
++let lastFailureLogAt = 0
++
++function decodeActivityWindows(reply) {
++  const rows = Array.isArray(reply?.activity_windows) ? reply.activity_windows : []
++  const windows = new Map()
++  for (const row of rows) {
++    const id = String(toNum(row?.id) || '').trim()
++    if (!id) continue
++    windows.set(id, {
++      id,
++      name: String(row?.name || ''),
++      beginTime: toNum(row?.begin_time),
++      endTime: toNum(row?.end_time),
++    })
++  }
++  return windows
++}
++
++async function refreshActivityWindows() {
++  if (pendingRefresh) return pendingRefresh
++  pendingRefresh = (async () => {
++    const body = types.ActivityListRequest.encode(
++      types.ActivityListRequest.create({}),
++    ).finish()
++    const { body: replyBody } = await sendMsgAsync(
++      'gamepb.activitypb.ActivityService',
++      'List',
++      body,
++    )
++    const reply = types.ActivityListReply.decode(replyBody)
++    const nextWindows = decodeActivityWindows(reply)
++    if (nextWindows.size === 0) {
++      throw new Error('活动列表回包未包含时间配置')
++    }
++    activityWindows = nextWindows
++    loadedAt = Date.now()
++    return activityWindows
++  })()
++  try {
++    return await pendingRefresh
++  }
++  finally {
++    pendingRefresh = null
++  }
++}
++
++async function getActivityWindows() {
++  const fresh = loadedAt > 0 && Date.now() - loadedAt < CACHE_TTL_MS
++  if (!fresh) {
++    try {
++      await refreshActivityWindows()
++    }
++    catch (error) {
++      // 已有缓存时容忍刷新失败，沿用旧窗口避免误判为「活动已结束」。
++      if (activityWindows.size === 0) throw error
++    }
++  }
++  return Array.from(activityWindows.values(), window => ({ ...window }))
++}
++
++function invalidateActivityWindows() {
++  loadedAt = 0
++}
++
++async function getSellConditionContext() {
++  const fresh = loadedAt > 0 && Date.now() - loadedAt < CACHE_TTL_MS
++  if (!fresh) {
++    try {
++      await refreshActivityWindows()
++    }
++    catch (error) {
++      const now = Date.now()
++      if (now - lastFailureLogAt >= RETRY_LOG_INTERVAL_MS) {
++        lastFailureLogAt = now
++        logWarn('仓库', `活动时间同步失败: ${error?.message || error}`)
++      }
++    }
++  }
++  return {
++    nowSec: getServerTimeSec(),
++    activityWindows,
++    activityWindowsLoaded: loadedAt > 0,
++  }
++}
++
++networkEvents.on('activitiesChanged', invalidateActivityWindows)
++networkEvents.on('disconnected', invalidateActivityWindows)
++
++module.exports = {
++  refreshActivityWindows,
++  getActivityWindows,
++  invalidateActivityWindows,
++  getSellConditionContext,
++}
+diff --git a/core/src/services/farm-land-analyzer.js b/core/src/services/farm-land-analyzer.js
+index c9140db..2ff47e4 100644
+--- a/core/src/services/farm-land-analyzer.js
++++ b/core/src/services/farm-land-analyzer.js
+@@ -1,5 +1,5 @@
+ const { PlantPhase, PHASE_NAMES } = require('../config/config');
+-const { getPlantName, getPlantExp, getPlantById, getPlantGrowTime, getPlantGrowPhases, getSeedImageBySeedId, getMutantDisplayPlantId, getMutantPlantImageByPhase, getMutantEffectsByIds } = require('../config/gameConfig');
++const { getPlantName, getPlantExp, getPlantById, getPlantGrowTime, getPlantGrowPhases, getSeedImageBySeedId, getMutantDisplayPlantId, getMutantPlantImageByPhase, getMutantEffectsByIds, getItemById } = require('../config/gameConfig');
+ const { toNum, toTimeSec, getServerTimeSec, logWarn } = require('../utils/utils');
+ const { getAllLands } = require('./farm-api');
+ 
+@@ -7,6 +7,322 @@ const GOLDEN_BUG_ITEM_ID = 301101;
+ const GOLDEN_BUG_SOCIAL_TYPE = 2;
+ const MATURE_PHASE_RECORD_ID = 19;
+ 
++// 抓包确认：黄金虫、足球和乌云由农场主通过自家 Farming 清理，好友帮助务农不能代为清理。
++// 乌云必须以 interaction_uses / interaction_targets 的实时记录为准；field_40={8,1} 只是清理后仍保留的历史。
++const OWNER_CLEANABLE_INTERACTION_ITEM_IDS = new Set(['301101', '301102', '5006']);
++
++// 5005 青蛙是农场级事件，不绑定某一块土地；清理时通过 FarmingRequest.field 5 发送。
++const OWNER_CLEANABLE_FARM_SOCIAL_EVENT_ITEM_IDS = new Set(['5005']);
++
++const QIXI_DEW_ITEM_ID = '301103';
++const QIXI_MUTANT_CONFIG_ID = '13';
++const QIXI_DEW_HISTORY_CODES = new Set([9, 10]);
++
++/** int64 字段统一按十进制字符串处理，避免 JS 大数精度丢失。 */
++function int64String(value) {
++  if (value == null) return '0';
++  const text = String(value && value.toString ? value.toString() : value).trim();
++  return /^-?\d+$/.test(text) ? text : '0';
++}
++
++/** 归一化成正十进制 ID 字符串，非法或 0 返回空串。 */
++function normalizePositiveId(value) {
++  const text = int64String(value);
++  return /^\d+$/.test(text) && text !== '0' ? text : '';
++}
++
++function getPlantExtendedStatuses(plant) {
++  if (Array.isArray(plant && plant.field_40)) return plant.field_40.filter(Boolean);
++  return plant && plant.field_40 ? [plant.field_40] : [];
++}
++
++function getInteractionItemMetadata(itemId) {
++  const item = getItemById(Number(itemId));
++  return {
++    name: String((item && item.name) || `道具${itemId}`),
++    activityId: toNum(item && item.activity_id)
++  };
++}
++
++function getQixiDewExtendedStatus(plant) {
++  if (!getPlantMutantConfigIds(plant).map(String).includes(QIXI_MUTANT_CONFIG_ID)) return null;
++  return getPlantExtendedStatuses(plant).find(status => (
++    QIXI_DEW_HISTORY_CODES.has(toNum(status && status.value_1))
++    && toNum(status && status.value_2) === 1
++  )) || null;
++}
++
++function getExtendedStatusInteractionItemId(plant) {
++  return getQixiDewExtendedStatus(plant) ? QIXI_DEW_ITEM_ID : '';
++}
++
++/**
++ * 从 interaction_uses / interaction_targets 还原作物上已生效的互动道具。
++ * 协议侧 uses 记录「谁用了什么」，targets 记录「作用在哪块地」，两者按 item/host/时间配对。
++ */
++function getPlantInteractionEffects(plant) {
++  const uses = Array.isArray(plant && plant.interaction_uses) ? plant.interaction_uses : [];
++  const targets = Array.isArray(plant && plant.interaction_targets) ? plant.interaction_targets : [];
++  const effects = [];
++  const usedTargetKeys = new Set();
++
++  const findTargets = (use) => {
++    const itemId = normalizePositiveId(use && use.item_id);
++    const hostGid = normalizePositiveId(use && use.host_gid);
++    const timestamp = int64String(use && use.timestamp);
++    const exact = targets.filter(target => (
++      normalizePositiveId(target && target.item_id) === itemId
++      && (!hostGid || normalizePositiveId(target && target.host_gid) === hostGid)
++      && (!timestamp || int64String(target && target.timestamp) === timestamp)
++    ));
++    if (exact.length > 0) return exact;
++    return targets.filter(target => normalizePositiveId(target && target.item_id) === itemId);
++  };
++
++  for (const use of uses) {
++    const itemId = normalizePositiveId(use && use.item_id);
++    if (!itemId) continue;
++    const metadata = getInteractionItemMetadata(itemId);
++    const matchingTargets = findTargets(use);
++    const targetList = matchingTargets.length > 0 ? matchingTargets : [null];
++    for (const target of targetList) {
++      const landId = normalizePositiveId(target && target.land_id);
++      const hostGid = normalizePositiveId(
++        (target && target.host_gid) != null ? target.host_gid : (use && use.host_gid)
++      );
++      const usedAt = int64String(
++        (target && target.timestamp) != null ? target.timestamp : (use && use.timestamp)
++      );
++      const targetKey = target
++        ? `${itemId}:${hostGid}:${usedAt}:${landId}`
++        : `${itemId}:${hostGid}:${usedAt}:`;
++      if (usedTargetKeys.has(targetKey)) continue;
++      usedTargetKeys.add(targetKey);
++      effects.push({
++        itemId,
++        itemName: metadata.name,
++        activityId: metadata.activityId,
++        effectType: toNum(use && use.effect_type),
++        landId,
++        hostGid,
++        usedAt,
++        confirmed: true,
++        source: 'protocol-land'
++      });
++    }
++  }
++
++  const extendedItemId = getExtendedStatusInteractionItemId(plant);
++  if (extendedItemId && !effects.some(effect => effect.itemId === extendedItemId)) {
++    const metadata = getInteractionItemMetadata(extendedItemId);
++    effects.push({
++      itemId: extendedItemId,
++      itemName: metadata.name,
++      activityId: metadata.activityId,
++      effectType: 0,
++      landId: '',
++      hostGid: '',
++      usedAt: '',
++      confirmed: true,
++      source: 'protocol-land'
++    });
++  }
++
++  return effects;
++}
++
++function hasOwnerCleanableInteraction(plant) {
++  const uses = Array.isArray(plant && plant.interaction_uses) ? plant.interaction_uses : [];
++  const targets = Array.isArray(plant && plant.interaction_targets) ? plant.interaction_targets : [];
++  return [...uses, ...targets].some(entry => (
++    OWNER_CLEANABLE_INTERACTION_ITEM_IDS.has(normalizePositiveId(entry && entry.item_id))
++  ));
++}
++
++function getCleanableFarmSocialEventItemIds(eventsOrReply) {
++  const events = Array.isArray(eventsOrReply)
++    ? eventsOrReply
++    : (Array.isArray(eventsOrReply && eventsOrReply.social_events) ? eventsOrReply.social_events : []);
++  return [...new Set(events
++    .map(event => normalizePositiveId(event && event.item_id))
++    .filter(itemId => OWNER_CLEANABLE_FARM_SOCIAL_EVENT_ITEM_IDS.has(itemId))
++    .map(Number))];
++}
++
++function buildFarmSocialEventDetails(eventsOrReply) {
++  const events = Array.isArray(eventsOrReply)
++    ? eventsOrReply
++    : (Array.isArray(eventsOrReply && eventsOrReply.social_events) ? eventsOrReply.social_events : []);
++  return events.map((event) => {
++    const itemId = normalizePositiveId(event && event.item_id);
++    if (!itemId) return null;
++    const metadata = getInteractionItemMetadata(itemId);
++    return {
++      itemId,
++      itemName: metadata.name,
++      activityId: metadata.activityId,
++      visitorGid: normalizePositiveId(event && event.visitor_gid),
++      occurredAt: int64String(event && event.timestamp),
++      cleanable: OWNER_CLEANABLE_FARM_SOCIAL_EVENT_ITEM_IDS.has(itemId)
++    };
++  }).filter(Boolean);
++}
++
++/**
++ * 生成单块土地的展示详情，好友农场与自己农场共用。
++ * friendMode 影响成熟态的语义：好友视角可偷为 stealable，否则为 harvested。
++ */
++function buildLandDetail(land, options = {}) {
++  const nowSec = Number(options.nowSec) || getServerTimeSec();
++  const friendMode = !!options.friendMode;
++  const landsMap = options.landsMap instanceof Map ? options.landsMap : buildLandMap([land]);
++  const id = toNum(land && land.id);
++  const level = toNum(land && land.level);
++  const maxLevel = toNum(land && land.max_level);
++  const landsLevel = toNum(land && land.lands_level);
++  const landSize = toNum(land && land.land_size);
++  const landBuff = {
++    plantYieldBonus: toNum(land && land.buff && land.buff.plant_yield_bonus),
++    plantingTimeReduction: toNum(land && land.buff && land.buff.planting_time_reduction),
++    plantExpBonus: toNum(land && land.buff && land.buff.plant_exp_bonus)
++  };
++  const context = getDisplayLandContext(land, landsMap);
++  const base = {
++    id,
++    unlocked: !!(land && land.unlocked),
++    level,
++    maxLevel,
++    landsLevel,
++    landSize,
++    landBuff,
++    couldUnlock: !!(land && land.could_unlock),
++    couldUpgrade: !!(land && land.could_upgrade),
++    occupiedByMaster: !!context.occupiedByMaster,
++    masterLandId: toNum(context.masterLandId),
++    occupiedLandIds: Array.isArray(context.occupiedLandIds) ? context.occupiedLandIds : [],
++    plantSize: 1,
++    rarity: 0,
++    mutantConfigIds: [],
++    mutantEffects: [],
++    isMutated: false,
++    purpleCrystalResonanceExpBonus: 0,
++    interactionEffects: [],
++    needInteractionCleanup: false,
++    protocolField40: null,
++    leftInorcFertTimes: null
++  };
++
++  if (!base.unlocked) {
++    return {
++      ...base,
++      status: 'locked',
++      plantName: '',
++      phaseName: friendMode ? '未解锁' : '',
++      currentSeason: 0,
++      totalSeason: 0,
++      occupiedByMaster: false,
++      masterLandId: 0,
++      occupiedLandIds: []
++    };
++  }
++
++  const sourceLand = context.sourceLand || land;
++  const plant = sourceLand && sourceLand.plant;
++  if (!plant || !Array.isArray(plant.phases) || plant.phases.length === 0) {
++    return {
++      ...base,
++      status: 'empty',
++      plantName: '',
++      phaseName: '空地',
++      currentSeason: 0,
++      totalSeason: 0
++    };
++  }
++
++  const currentPhase = getCurrentPhase(plant.phases, false, '', toNum(plant.id));
++  if (!currentPhase) {
++    return { ...base, status: 'empty', plantName: '', phaseName: '', currentSeason: 0, totalSeason: 0 };
++  }
++
++  const phaseVal = toNum(currentPhase.phase);
++  const plantId = toNum(plant.id);
++  const mutantConfigIds = [...new Set([
++    ...getPlantMutantConfigIds(plant, currentPhase).map(String),
++    ...getPlantInteractionEffects(plant)
++      .filter(effect => normalizePositiveId(effect.itemId) === QIXI_DEW_ITEM_ID)
++      .map(() => QIXI_MUTANT_CONFIG_ID)
++  ])];
++  const mutantEffects = getMutantEffectsByIds(mutantConfigIds);
++  // 协议没有独立的“紫晶共鸣”布尔值：紫金土地由 level 标识，
++  // 是否存在加成及具体比例必须以服务端 LandInfo.buff.plant_exp_bonus 为准。
++  const purpleCrystalResonanceExpBonus = level === 5 && mutantConfigIds.length > 0
++    ? Math.max(0, landBuff.plantExpBonus)
++    : 0;
++  const displayPlantId = getMutantDisplayPlantId(plantId, mutantConfigIds);
++  const plantName = getPlantName(displayPlantId) || getPlantName(plantId) || plant.name || '未知';
++  const plantCfg = getPlantById(plantId);
++  const seedId = toNum(plantCfg && plantCfg.seed_id);
++  const plantSize = Math.max(1, toNum(plantCfg && plantCfg.size) || toNum(sourceLand.land_size) || landSize || 1);
++  const totalSeason = Math.max(1, toNum(plantCfg && plantCfg.seasons) || 1);
++  const currentSeasonRaw = toNum(plant.season);
++  const currentSeason = currentSeasonRaw > 0 ? Math.min(currentSeasonRaw, totalSeason) : 1;
++  const maturePhase = Array.isArray(plant.phases)
++    ? plant.phases
++      .filter(phase => phase && toTimeSec(phase.begin_time) > 0)
++      .sort((left, right) => toTimeSec(right.begin_time) - toTimeSec(left.begin_time))[0]
++    : null;
++  const matureBegin = maturePhase ? toTimeSec(maturePhase.begin_time) : 0;
++  const matureInSec = matureBegin > nowSec ? matureBegin - nowSec : 0;
++  const statusFlags = {
++    needWater: toNum(plant.dry_num) > 0 || (toTimeSec(currentPhase.dry_time) > 0 && toTimeSec(currentPhase.dry_time) <= nowSec),
++    needWeed: (Array.isArray(plant.weed_owners) && plant.weed_owners.length > 0)
++      || (toTimeSec(currentPhase.weeds_time) > 0 && toTimeSec(currentPhase.weeds_time) <= nowSec),
++    needBug: (Array.isArray(plant.insect_owners) && plant.insect_owners.length > 0)
++      || (toTimeSec(currentPhase.insect_time) > 0 && toTimeSec(currentPhase.insect_time) <= nowSec)
++  };
++
++  let status = 'growing';
++  if (phaseVal === PlantPhase.MATURE) status = friendMode ? (plant.stealable ? 'stealable' : 'harvested') : 'harvestable';
++  else if (phaseVal === PlantPhase.DEAD) status = 'dead';
++  else if (phaseVal === PlantPhase.UNKNOWN) status = 'empty';
++
++  const protocolField40 = getPlantExtendedStatuses(plant).map(entry => ({
++    value1: int64String(entry && entry.value_1),
++    value2: int64String(entry && entry.value_2)
++  }));
++
++  return {
++    ...base,
++    status,
++    plantId,
++    displayPlantId,
++    plantName,
++    seedId,
++    seedImage: seedId > 0 ? getSeedImageBySeedId(seedId) : '',
++    phaseName: currentPhase.phaseName || PHASE_NAMES[phaseVal] || '',
++    currentSeason,
++    totalSeason,
++    matureInSec,
++    totalGrowTime: getPlantGrowTime(plantId),
++    needWater: statusFlags.needWater,
++    needWeed: statusFlags.needWeed,
++    needBug: statusFlags.needBug,
++    stealable: !!plant.stealable,
++    plantSize,
++    rarity: toNum(plant.rarity != null ? plant.rarity : (plant.rare_level != null ? plant.rare_level : plant.rarity_level)),
++    mutantConfigIds,
++    mutantEffects,
++    isMutated: mutantConfigIds.length > 0,
++    purpleCrystalResonanceExpBonus,
++    interactionEffects: getPlantInteractionEffects(plant),
++    needInteractionCleanup: hasOwnerCleanableInteraction(plant),
++    protocolField40: protocolField40.length > 0 ? protocolField40 : null,
++    leftInorcFertTimes: Object.prototype.hasOwnProperty.call(plant, 'left_inorc_fert_times')
++      ? toNum(plant.left_inorc_fert_times)
++      : null
++  };
++}
++
+ function hasGoldenBug(plant) {
+   return !!(plant && Array.isArray(plant.social_items) && plant.social_items.some(item => (
+     toNum(item && item.item_id) === GOLDEN_BUG_ITEM_ID &&
+@@ -613,5 +929,14 @@ module.exports = {
+   analyzeLands,
+   resolveRemovableHarvestedLands,
+   getQixiDewStatus,
+-  getLandsDetail
++  getLandsDetail,
++  int64String,
++  normalizePositiveId,
++  getPlantExtendedStatuses,
++  getInteractionItemMetadata,
++  getPlantInteractionEffects,
++  hasOwnerCleanableInteraction,
++  getCleanableFarmSocialEventItemIds,
++  buildFarmSocialEventDetails,
++  buildLandDetail
+ };
+diff --git a/core/src/services/friend-interaction-items.js b/core/src/services/friend-interaction-items.js
+new file mode 100644
+index 0000000..a3bebe7
+--- /dev/null
++++ b/core/src/services/friend-interaction-items.js
+@@ -0,0 +1,745 @@
++// 特殊互动道具：库存发现、协议适配与顺序批量使用（好友农场与自己农场共用）。
++//
++// 这类道具（种草、黄金虫、足球、乌云、闪电变异瓶等）不是普通背包消耗品，
++// 必须通过 itempb.Use 带 UseTarget 发送，由服务器校验地块与作物状态。
++
++const LongModule = require('long');
++const { PlantPhase } = require('../config/config');
++const { getItemById, getItemImageById } = require('../config/gameConfig');
++const { isSellConditionSatisfied } = require('../config/sell-conditions');
++const { sendMsgAsync, getUserState } = require('../utils/network');
++const { types } = require('../utils/proto');
++const { toNum } = require('../utils/utils');
++const { getSellConditionContext } = require('./activity-windows');
++const { getAllLands } = require('./farm-api');
++const {
++  buildLandMap,
++  buildLandDetail,
++  getCurrentPhase,
++  getDisplayLandContext,
++  getPlantInteractionEffects,
++} = require('./farm-land-analyzer');
++const { enterFriendFarm, leaveFriendFarm, parseRpcErrorCode } = require('./friend-api');
++const { getBag, getBagItems } = require('./warehouse');
++
++const SPECIAL_INTERACTION_TYPE = 'additemuseitem';
++const MAX_BATCH_LANDS = 48;
++const MAX_SIGNED_INT64 = 9223372036854775807n;
++const FRIEND_FARM_ITEM_IDS = new Set([5005]);
++
++/**
++ * 可以对自己农场使用的互动道具白名单。
++ * 种草、黄金虫、足球一类只能作用于他人农场，官方客户端也不提供自用入口，
++ * 因此这里逐个登记，而不是按 interaction_type 放行。
++ */
++const SELF_USABLE_INTERACTION_ITEM_IDS = new Set([
++  5003, // 闪电变异瓶：自己的未成熟 1*1 作物。
++  301103, // 七夕活动土地道具，展示名称由 ItemInfo 提供。
++]);
++
++class FriendInteractionBusinessError extends Error {
++  constructor(code, message) {
++    super(message);
++    this.name = 'FriendInteractionBusinessError';
++    this.code = code;
++  }
++}
++
++function businessError(code, message) {
++  return new FriendInteractionBusinessError(code, message);
++}
++
++function int64String(value) {
++  if (value == null) return '0';
++  if (LongModule.isLong(value)) return value.toString();
++  const text = String(value).trim();
++  return /^-?\d+$/.test(text) ? text : '0';
++}
++
++function positiveDecimal(value, code, fieldName) {
++  const normalized = int64String(value);
++  if (!/^[1-9]\d*$/.test(normalized) || normalized.length > 19 || BigInt(normalized) > MAX_SIGNED_INT64) {
++    throw businessError(code, `${fieldName} 必须是 int64 范围内的正十进制整数`);
++  }
++  return normalized;
++}
++
++function safePositiveNumber(value, code, fieldName) {
++  const normalized = positiveDecimal(value, code, fieldName);
++  const numeric = Number(normalized);
++  if (!Number.isSafeInteger(numeric) || numeric <= 0) {
++    throw businessError(code, `${fieldName} 超出当前客户端可处理范围`);
++  }
++  return numeric;
++}
++
++function normalizeLandIds(value) {
++  const source = Array.isArray(value) ? value : [value];
++  const unique = new Set();
++  for (const entry of source) {
++    unique.add(positiveDecimal(entry, 'INVALID_FRIEND_INTERACTION_LAND_IDS', 'landIds'));
++  }
++  if (unique.size === 0) {
++    throw businessError('INVALID_FRIEND_INTERACTION_LAND_IDS', '至少选择一块地');
++  }
++  if (unique.size > MAX_BATCH_LANDS) {
++    throw businessError('INVALID_FRIEND_INTERACTION_LAND_IDS', `单次最多选择 ${MAX_BATCH_LANDS} 块地`);
++  }
++  return [...unique].sort((left, right) => {
++    const leftId = BigInt(left);
++    const rightId = BigInt(right);
++    return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
++  });
++}
++
++function isFriendLandInteractionMetadata(info) {
++  if (!info || typeof info !== 'object') return false;
++  if (Number(info.type) !== 23 || Number(info.can_use) <= 0) return false;
++  if (String(info.interaction_type || '').trim().toLowerCase() !== SPECIAL_INTERACTION_TYPE) return false;
++
++  const id = Number(info.id) || 0;
++  if (id === 301101 || id === 301102 || id === 301103) return true;
++
++  // 排除同属 additemuseitem、但描述明确只作用于自己作物的物品。
++  const targetDescription = `${String(info.desc || '')} ${String(info.effectDesc || '')}`;
++  return /好友|他人/.test(targetDescription);
++}
++
++function isLandInteractionMetadata(info) {
++  if (!info || typeof info !== 'object') return false;
++  return Number(info.type) === 23
++    && Number(info.can_use) > 0
++    && String(info.interaction_type || '').trim().toLowerCase() === SPECIAL_INTERACTION_TYPE;
++}
++
++function isFriendFarmInteractionMetadata(info) {
++  const itemId = Number(info && info.id) || 0;
++  return !!info && Number(info.type) === 23 && Number(info.can_use) > 0 && FRIEND_FARM_ITEM_IDS.has(itemId);
++}
++
++function isSelfLandInteractionMetadata(info) {
++  if (!isLandInteractionMetadata(info)) return false;
++  return SELF_USABLE_INTERACTION_ITEM_IDS.has(Number(info.id) || 0);
++}
++
++function getStackExpireTime(stack) {
++  return toNum(stack && stack.expire_time != null ? stack.expire_time : stack.expireTime);
++}
++
++function isStackSaleConditionSatisfied(info, stack, baseContext) {
++  const condition = String(info && info.sell_cond || '').trim();
++  if (!condition) return false;
++  return isSellConditionSatisfied(condition, {
++    ...baseContext,
++    expireTime: getStackExpireTime(stack),
++  });
++}
++
++function eligibleStacksForItem(bagItems, itemId, info, baseContext) {
++  return (Array.isArray(bagItems) ? bagItems : [])
++    .filter(stack => (
++      toNum(stack && stack.id != null ? stack.id : stack.item_id) === itemId
++      && toNum(stack && stack.uid) > 0
++      && toNum(stack && stack.count) > 0
++      && !stack.locked
++    ))
++    .map(stack => ({
++      raw: stack,
++      remaining: Math.max(0, toNum(stack && stack.count)),
++      expireTime: getStackExpireTime(stack),
++      saleConditionSatisfied: isStackSaleConditionSatisfied(info, stack, baseContext),
++    }))
++    .sort((left, right) => {
++      const leftExpire = left.expireTime > 0 ? left.expireTime : Number.MAX_SAFE_INTEGER;
++      const rightExpire = right.expireTime > 0 ? right.expireTime : Number.MAX_SAFE_INTEGER;
++      return leftExpire - rightExpire;
++    });
++}
++
++function buildInteractionItemDto(info, stacks, targetKind = 'land') {
++  const count = stacks.reduce((sum, stack) => sum + Math.max(0, Number(stack.remaining) || 0), 0);
++  const saleConditionSatisfiedCount = stacks
++    .filter(stack => stack.saleConditionSatisfied)
++    .reduce((sum, stack) => sum + Math.max(0, Number(stack.remaining) || 0), 0);
++  const expirations = stacks
++    .map(stack => Number(stack.expireTime) || 0)
++    .filter(expireTime => expireTime > 0)
++    .sort((left, right) => left - right);
++  const itemId = Number(info.id) || 0;
++  return {
++    id: String(itemId),
++    itemId: String(itemId),
++    name: String(info.name || `物品${itemId}`),
++    image: getItemImageById(itemId) || '',
++    count,
++    saleConditionSatisfiedCount,
++    interactionType: String(info.interaction_type || ''),
++    protocol: 'item-use',
++    selfUsable: SELF_USABLE_INTERACTION_ITEM_IDS.has(itemId),
++    targetKind,
++    description: String(info.desc || info.effectDesc || ''),
++    activityId: info.activity_id == null ? '' : String(info.activity_id),
++    sellCondition: String(info.sell_cond || ''),
++    nearestExpireTime: expirations[0] || 0,
++    serverValidationRequired: true,
++  };
++}
++
++function buildInteractionInventory(predicate, targetKind, bagItems, baseContext) {
++  const itemIds = new Set();
++  for (const stack of (Array.isArray(bagItems) ? bagItems : [])) {
++    const itemId = toNum(stack && stack.id != null ? stack.id : stack.item_id);
++    if (itemId > 0 && toNum(stack && stack.count) > 0) itemIds.add(itemId);
++  }
++
++  const items = [];
++  const stacksByItemId = new Map();
++  for (const itemId of itemIds) {
++    const info = getItemById(itemId);
++    if (!predicate(info)) continue;
++    const allItemStacks = bagItems.filter(stack => toNum(stack && stack.id != null ? stack.id : stack.item_id) === itemId);
++    const stacks = eligibleStacksForItem(allItemStacks, itemId, info, baseContext);
++    const dto = buildInteractionItemDto(info, stacks, targetKind);
++    if (dto.count <= 0) continue;
++    stacksByItemId.set(itemId, stacks);
++    items.push(dto);
++  }
++
++  items.sort((left, right) => {
++    if (right.count !== left.count) return right.count - left.count;
++    return Number(left.itemId) - Number(right.itemId);
++  });
++  return { items, stacksByItemId };
++}
++
++async function collectInteractionInventory(predicate, targetKind = 'land') {
++  const bagReply = await getBag();
++  const baseContext = await getSellConditionContext();
++  return buildInteractionInventory(predicate, targetKind, getBagItems(bagReply), baseContext);
++}
++
++async function getFriendInteractionItems() {
++  const bagReply = await getBag();
++  const baseContext = await getSellConditionContext();
++  const bagItems = getBagItems(bagReply);
++  const landInventory = buildInteractionInventory(isFriendLandInteractionMetadata, 'land', bagItems, baseContext);
++  const farmInventory = buildInteractionInventory(isFriendFarmInteractionMetadata, 'farm', bagItems, baseContext);
++  const items = [...landInventory.items, ...farmInventory.items];
++  return {
++    items,
++    count: items.length,
++    serverValidationRequired: true,
++    confirmationRequired: true,
++    message: items.length > 0
++      ? '请选择好友农场或土地使用'
++      : '背包中暂无可用于好友农场的特殊互动道具',
++  };
++}
++
++async function getSelfInteractionItems() {
++  const inventory = await collectInteractionInventory(isSelfLandInteractionMetadata, 'land');
++  const items = inventory.items.filter(item => item.selfUsable);
++  return {
++    items,
++    count: items.length,
++    serverValidationRequired: true,
++    confirmationRequired: true,
++    message: items.length > 0
++      ? '请选择自己农场中符合条件的土地使用'
++      : '背包中暂无可对自己农场使用的特殊互动道具',
++  };
++}
++
++function hasInteractionItem(detail, itemId) {
++  return (Array.isArray(detail && detail.interactionEffects) ? detail.interactionEffects : [])
++    .some(effect => String(effect && effect.itemId || '') === String(itemId));
++}
++
++function isEligibleInteractionTarget(itemId, detail, currentPhase) {
++  const phase = toNum(currentPhase && currentPhase.phase);
++  const rarity = toNum(detail && detail.rarity);
++  const mutantIds = new Set(
++    (Array.isArray(detail && detail.mutantConfigIds) ? detail.mutantConfigIds : []).map(String),
++  );
++  if (itemId === 5003) {
++    return phase >= PlantPhase.GERMINATION
++      && phase <= PlantPhase.BLOOMING
++      && toNum(detail && detail.plantSize) === 1
++      && rarity !== 4
++      && rarity !== 5
++      && !mutantIds.has('12');
++  }
++  if (itemId === 5004) {
++    return phase >= PlantPhase.GERMINATION
++      && phase <= PlantPhase.BLOOMING
++      && rarity !== 4
++      && rarity !== 5
++      && !hasInteractionItem(detail, itemId);
++  }
++  if (itemId === 5006 || itemId === 301101 || itemId === 301102 || itemId === 301103) {
++    return phase >= PlantPhase.SEED && phase <= PlantPhase.BLOOMING && !hasInteractionItem(detail, itemId);
++  }
++  return phase !== PlantPhase.DEAD;
++}
++
++function buildTargetLandMap(landsInput, itemId, friendMode) {
++  const lands = Array.isArray(landsInput) ? landsInput : [];
++  const landsMap = buildLandMap(lands);
++  const targets = new Map();
++  for (const land of lands) {
++    if (!land || !land.unlocked) continue;
++    const context = getDisplayLandContext(land, landsMap);
++    if (context.occupiedByMaster) continue;
++    const sourceLand = context.sourceLand || land;
++    const landId = toNum(sourceLand && sourceLand.id);
++    if (landId <= 0 || targets.has(String(landId))) continue;
++    const plant = sourceLand && sourceLand.plant;
++    if (!plant || !Array.isArray(plant.phases) || plant.phases.length === 0) continue;
++    const currentPhase = getCurrentPhase(plant.phases, false, '', toNum(plant.id));
++    const detail = buildLandDetail(sourceLand, { friendMode, landsMap });
++    if (!isEligibleInteractionTarget(itemId, detail, currentPhase)) continue;
++    targets.set(String(landId), {
++      landId: String(landId),
++      plantId: int64String(plant.id),
++      occupiedLandIds: (Array.isArray(context.occupiedLandIds) ? context.occupiedLandIds : [landId])
++        .map(id => String(toNum(id)))
++        .filter(id => id !== '0'),
++      detail,
++    });
++  }
++  return targets;
++}
++
++function currentStack(stacks) {
++  return stacks.find(stack => Number(stack.remaining) > 0) || null;
++}
++
++async function sendTargetedItemUse(itemId, stack, friendGid, landId) {
++  const request = types.UseRequest.create({
++    item: {
++      id: itemId,
++      count: 1,
++      uid: stack.raw.uid,
++    },
++    target: {
++      host_gid: friendGid,
++      land_ids: [landId],
++      use_config_id: 0,
++    },
++  });
++  const body = Buffer.from(types.UseRequest.encode(request).finish());
++  const { body: replyBody } = await sendMsgAsync('gamepb.itempb.ItemService', 'Use', body);
++  return types.UseReply.decode(replyBody);
++}
++
++async function sendFriendFarmItemUse(itemId, stack, friendGid) {
++  const request = types.UseRequest.create({
++    item: { id: itemId, count: 1, uid: stack.raw.uid },
++    target: { host_gid: friendGid, use_config_id: 0 },
++  });
++  const body = Buffer.from(types.UseRequest.encode(request).finish());
++  const { body: replyBody } = await sendMsgAsync('gamepb.itempb.ItemService', 'Use', body);
++  return types.UseReply.decode(replyBody);
++}
++
++function normalizedErrorCode(error) {
++  const fromCode = String((error && error.code) || '').trim();
++  if (fromCode) return fromCode;
++  const fromRpc = parseRpcErrorCode(error);
++  if (fromRpc) return String(fromRpc);
++  const matched = String((error && error.message) || '').match(/\bcode=(\d+)\b/);
++  return (matched && matched[1]) || 'FRIEND_INTERACTION_USE_FAILED';
++}
++
++/**
++ * 判断一次失败是否来自服务器明确回复（网关层错误码）。
++ * 服务器明确拒绝只是这一块地不符合条件，可以继续下一块；
++ * 本地网络/连接异常则必须中断，避免批量刷请求。
++ */
++function isGatewayRejection(error) {
++  return parseRpcErrorCode(error) > 0 || typeof (error && error.errorMessage) === 'string';
++}
++
++function interactionFailure(itemName, landId, error, target = null) {
++  const code = normalizedErrorCode(error);
++  const knownMessages = {
++    1001065: `该地块当前不符合${itemName}的使用条件，作物品级或状态可能已变化`,
++    1003008: `该农场当前已达到${itemName}的使用限制`,
++    FRIEND_INTERACTION_TARGET_UNAVAILABLE: '该地块已经没有可互动的作物',
++  };
++  const serverMessage = String((error && error.errorMessage) || '').trim();
++  const businessMessage = error instanceof FriendInteractionBusinessError ? String(error.message || '') : '';
++  return {
++    landId,
++    ok: false,
++    code,
++    message: knownMessages[code] || businessMessage || serverMessage || `服务器未接受该地块的${itemName}使用请求`,
++    target,
++  };
++}
++
++function normalizeReplyItems(itemsInput) {
++  return (Array.isArray(itemsInput) ? itemsInput : []).map(item => ({
++    id: int64String(item && item.id != null ? item.id : item.item_id),
++    count: int64String(item && item.count),
++    landId: int64String(item && item.land_id),
++  }));
++}
++
++function interactionItemName(itemId, info) {
++  return String((info && info.name) || (getItemById(itemId) && getItemById(itemId).name) || `道具${itemId}`);
++}
++
++function normalizeUpdatedLand(rawLand, target = null, friendMode = true) {
++  if (!rawLand || typeof rawLand !== 'object') return null;
++  let detail;
++  try {
++    detail = buildLandDetail(rawLand, { friendMode });
++  }
++  catch {
++    detail = {
++      id: toNum(rawLand.id),
++      unlocked: !!rawLand.unlocked,
++      status: 'growing',
++      plantName: String(rawLand && rawLand.plant && rawLand.plant.name || ''),
++      occupiedLandIds: [],
++      mutantConfigIds: [],
++      mutantEffects: [],
++      isMutated: false,
++      interactionEffects: [],
++    };
++  }
++  if (target && Array.isArray(target.occupiedLandIds) && target.occupiedLandIds.length > 0) {
++    detail.occupiedLandIds = [...new Set(target.occupiedLandIds.map(id => String(id)))];
++  }
++  return detail;
++}
++
++function buildConfirmedInteractionEffects(rawLand, itemId, landId, itemName) {
++  const itemActivityId = toNum(getItemById(itemId) && getItemById(itemId).activity_id);
++  const protocolEffects = typeof getPlantInteractionEffects === 'function'
++    ? getPlantInteractionEffects(rawLand && rawLand.plant)
++    : [];
++  const matched = protocolEffects
++    .filter(effect => (
++      String(effect.itemId || '') === String(itemId)
++      && (!effect.landId || String(effect.landId) === String(landId))
++    ))
++    .map(effect => ({
++      ...effect,
++      landId: String(effect.landId || landId),
++      itemId: String(effect.itemId || itemId),
++      itemName: String(effect.itemName || itemName),
++      activityId: toNum(effect.activityId) || itemActivityId,
++      plantId: int64String(rawLand && rawLand.plant && rawLand.plant.id),
++      confirmed: true,
++    }));
++  if (matched.length > 0) return matched;
++
++  return [{
++    landId: String(landId),
++    itemId: String(itemId),
++    itemName,
++    activityId: itemActivityId,
++    plantId: int64String(rawLand && rawLand.plant && rawLand.plant.id),
++    effectType: 0,
++    confirmed: true,
++    source: 'use-reply',
++  }];
++}
++
++/** 读取并校验本次批量使用要消耗的库存，返回按过期时间排序的可用堆叠。 */
++async function resolveUsableStacks(itemId, info, landCount) {
++  const inventory = await collectInteractionInventory(
++    candidate => isLandInteractionMetadata(candidate) || isFriendFarmInteractionMetadata(candidate),
++    'land',
++  );
++  const stacks = inventory.stacksByItemId.get(itemId) || [];
++  const available = stacks.reduce((sum, stack) => sum + Math.max(0, Number(stack.remaining) || 0), 0);
++  const displayName = (info && info.name) || `物品${itemId}`;
++  if (available <= 0) {
++    throw businessError('FRIEND_INTERACTION_ITEM_UNAVAILABLE', `${displayName}当前没有可提交服务器校验的库存`);
++  }
++  if (landCount > available) {
++    throw businessError('FRIEND_INTERACTION_SELECTION_EXCEEDS_BALANCE', `已选择 ${landCount} 块地，但当前只有 ${available} 个${displayName}`);
++  }
++  return stacks;
++}
++
++/**
++ * 在同一次农场会话内按地块编号顺序逐块提交道具使用。
++ * 好友农场由调用方负责 Enter/Leave，自己农场直接使用 AllLands 快照。
++ */
++async function runInteractionBatch(itemId, info, stacks, hostGid, landsInput, landIds, friendMode = true, propagateErrors = false) {
++  const itemName = String((info && info.name) || `物品${itemId}`);
++  const targetMap = buildTargetLandMap(landsInput, itemId, friendMode);
++  const attempts = [];
++
++  for (let index = 0; index < landIds.length; index += 1) {
++    const landId = landIds[index];
++    const target = targetMap.get(landId) || null;
++    if (!target) {
++      attempts.push(interactionFailure(
++        itemName,
++        landId,
++        businessError('FRIEND_INTERACTION_TARGET_UNAVAILABLE', '所选地块已无可互动作物'),
++      ));
++      continue;
++    }
++
++    const stack = currentStack(stacks);
++    if (!stack) {
++      attempts.push(interactionFailure(
++        itemName,
++        landId,
++        businessError('FRIEND_INTERACTION_ITEM_DEPLETED', '本次可用库存已经用完'),
++        target,
++      ));
++      continue;
++    }
++
++    try {
++      const reply = await sendTargetedItemUse(itemId, stack, hostGid, landId);
++      stack.remaining -= 1;
++      const updatedLand = normalizeUpdatedLand(reply && reply.land, target, friendMode);
++      const interactionEffects = buildConfirmedInteractionEffects(
++        reply && reply.land,
++        itemId,
++        landId,
++        interactionItemName(itemId, info),
++      );
++      attempts.push({
++        landId,
++        ok: true,
++        code: '',
++        message: `第 ${landId} 块地使用成功`,
++        target,
++        updatedLand,
++        interactionEffects,
++        consumed: normalizeReplyItems((reply && reply.consumed) || (reply && reply.used_items) || []),
++        rewards: normalizeReplyItems([
++          ...(Array.isArray(reply && reply.rewards) ? reply.rewards : []),
++          ...(Array.isArray(reply && reply.items) ? reply.items : []),
++          ...(Array.isArray(reply && reply.land_reward && reply.land_reward.items) ? reply.land_reward.items : []),
++        ]),
++      });
++    }
++    catch (error) {
++      if (propagateErrors && isGatewayRejection(error)) {
++        throw error;
++      }
++      attempts.push(interactionFailure(itemName, landId, error, target));
++      const gatewayFailure = isGatewayRejection(error);
++      if (!gatewayFailure && !(error instanceof FriendInteractionBusinessError)) {
++        for (const remainingLandId of landIds.slice(index + 1)) {
++          attempts.push({
++            landId: remainingLandId,
++            ok: false,
++            code: 'FRIEND_INTERACTION_BATCH_ABORTED',
++            message: '前序请求被中断，本地未继续提交该地块',
++            target: targetMap.get(remainingLandId) || null,
++          });
++        }
++        break;
++      }
++    }
++  }
++
++  return attempts;
++}
++
++async function performFriendInteractionItemBatch(friendGidInput, itemIdInput, landIdsInput, propagateErrors = false) {
++  const friendGid = positiveDecimal(friendGidInput, 'INVALID_FRIEND_INTERACTION_GID', 'friendGid');
++  const friendGidNumber = safePositiveNumber(friendGid, 'INVALID_FRIEND_INTERACTION_GID', 'friendGid');
++  const itemId = safePositiveNumber(itemIdInput, 'INVALID_FRIEND_INTERACTION_ITEM_ID', 'itemId');
++  const landIds = normalizeLandIds(landIdsInput);
++  const info = getItemById(itemId);
++  if (!isFriendLandInteractionMetadata(info)) {
++    throw businessError('FRIEND_INTERACTION_ITEM_UNSUPPORTED', '该物品不是可用于好友土地的特殊互动道具');
++  }
++
++  const stacks = await resolveUsableStacks(itemId, info, landIds.length);
++
++  const enterReply = await enterFriendFarm(friendGidNumber);
++  let attempts = [];
++  try {
++    const actualGid = int64String(enterReply && enterReply.basic && enterReply.basic.gid);
++    if (actualGid !== '0' && actualGid !== friendGid) {
++      throw businessError('FRIEND_INTERACTION_HOST_MISMATCH', '进入的好友农场与所选 GID 不一致');
++    }
++    attempts = await runInteractionBatch(
++      itemId, info, stacks, friendGid,
++      (enterReply && enterReply.lands) || [], landIds, true, propagateErrors,
++    );
++  }
++  finally {
++    await leaveFriendFarm(friendGidNumber);
++  }
++
++  const succeeded = attempts.filter(attempt => attempt.ok);
++  const failed = attempts.filter(attempt => !attempt.ok);
++  const ownerName = String(
++    (enterReply && enterReply.basic && (enterReply.basic.remark || enterReply.basic.name))
++    || `GID:${friendGid}`,
++  );
++  const itemName = String((info && info.name) || `物品${itemId}`);
++  const refreshedInventory = await getFriendInteractionItems();
++  const updatedLands = succeeded
++    .map(attempt => attempt.updatedLand)
++    .filter(Boolean);
++  const interactionEffects = succeeded.flatMap(attempt => (
++    Array.isArray(attempt.interactionEffects) ? attempt.interactionEffects : []
++  ));
++  return {
++    hostGid: friendGid,
++    ownerName,
++    itemId: String(itemId),
++    itemName,
++    protocol: 'item-use',
++    requestedLandIds: landIds,
++    usedLandIds: succeeded.map(attempt => attempt.landId),
++    failedLandIds: failed.map(attempt => attempt.landId),
++    successCount: succeeded.length,
++    failureCount: failed.length,
++    results: attempts,
++    updatedLands,
++    interactionEffects,
++    items: refreshedInventory.items,
++    message: failed.length > 0
++      ? `已在${ownerName}的农场按顺序使用 ${succeeded.length} 个${itemName}，跳过 ${failed.length} 块地`
++      : `已在${ownerName}的农场按顺序使用 ${succeeded.length} 个${itemName}`,
++  };
++}
++
++async function performFriendFarmInteractionItem(friendGidInput, itemIdInput, propagateErrors = false) {
++  const friendGid = positiveDecimal(friendGidInput, 'INVALID_FRIEND_INTERACTION_GID', 'friendGid');
++  const friendGidNumber = safePositiveNumber(friendGid, 'INVALID_FRIEND_INTERACTION_GID', 'friendGid');
++  const itemId = safePositiveNumber(itemIdInput, 'INVALID_FRIEND_INTERACTION_ITEM_ID', 'itemId');
++  const info = getItemById(itemId);
++  if (!isFriendFarmInteractionMetadata(info)) {
++    throw businessError('FRIEND_INTERACTION_ITEM_UNSUPPORTED', '该物品不是可用于好友农场的特殊互动道具');
++  }
++  const stacks = await resolveUsableStacks(itemId, info, 1);
++  const stack = currentStack(stacks);
++  if (!stack) {
++    throw businessError('FRIEND_INTERACTION_ITEM_UNAVAILABLE', `${(info && info.name) || `物品${itemId}`}当前没有可用库存`);
++  }
++
++  const enterReply = await enterFriendFarm(friendGidNumber);
++  try {
++    const actualGid = int64String(enterReply && enterReply.basic && enterReply.basic.gid);
++    if (actualGid !== '0' && actualGid !== friendGid) {
++      throw businessError('FRIEND_INTERACTION_HOST_MISMATCH', '进入的好友农场与所选 GID 不一致');
++    }
++    await sendFriendFarmItemUse(itemId, stack, friendGid);
++    const itemName = String((info && info.name) || `物品${itemId}`);
++    return {
++      hostGid: friendGid,
++      ownerName: String(
++        (enterReply && enterReply.basic && (enterReply.basic.remark || enterReply.basic.name))
++        || `GID:${friendGid}`,
++      ),
++      itemId: String(itemId),
++      itemName,
++      targetKind: 'farm',
++      protocol: 'item-use',
++      requestedLandIds: [],
++      usedLandIds: [],
++      failedLandIds: [],
++      successCount: 1,
++      failureCount: 0,
++      results: [{ landId: '', ok: true, code: '', message: `已在好友农场使用${itemName}` }],
++      items: (await getFriendInteractionItems()).items,
++      message: `已在好友农场使用 1 个${itemName}`,
++    };
++  }
++  finally {
++    await leaveFriendFarm(friendGidNumber);
++  }
++}
++
++function currentAccountGid() {
++  const state = getUserState() || {};
++  return positiveDecimal(state.gid, 'SELF_INTERACTION_ACCOUNT_UNAVAILABLE', '当前账号 GID');
++}
++
++async function performSelfInteractionItemBatch(itemIdInput, landIdsInput, propagateErrors = false) {
++  const hostGid = currentAccountGid();
++  const itemId = safePositiveNumber(itemIdInput, 'INVALID_FRIEND_INTERACTION_ITEM_ID', 'itemId');
++  const landIds = normalizeLandIds(landIdsInput);
++  const info = getItemById(itemId);
++  if (!isSelfLandInteractionMetadata(info)) {
++    throw businessError('SELF_INTERACTION_ITEM_UNSUPPORTED', '该道具只能在好友农场使用，不能对自己的农场使用');
++  }
++
++  const stacks = await resolveUsableStacks(itemId, info, landIds.length);
++  const landsReply = await getAllLands();
++  const attempts = await runInteractionBatch(
++    itemId, info, stacks, hostGid,
++    (landsReply && landsReply.lands) || [], landIds, false, propagateErrors,
++  );
++
++  const succeeded = attempts.filter(attempt => attempt.ok);
++  const failed = attempts.filter(attempt => !attempt.ok);
++  const itemName = String((info && info.name) || `物品${itemId}`);
++  const refreshedInventory = await getSelfInteractionItems();
++  const updatedLands = succeeded
++    .map(attempt => attempt.updatedLand)
++    .filter(Boolean);
++  const interactionEffects = succeeded.flatMap(attempt => (
++    Array.isArray(attempt.interactionEffects) ? attempt.interactionEffects : []
++  ));
++  return {
++    hostGid,
++    ownerName: '我的农场',
++    isSelf: true,
++    itemId: String(itemId),
++    itemName,
++    protocol: 'item-use',
++    requestedLandIds: landIds,
++    usedLandIds: succeeded.map(attempt => attempt.landId),
++    failedLandIds: failed.map(attempt => attempt.landId),
++    successCount: succeeded.length,
++    failureCount: failed.length,
++    results: attempts,
++    updatedLands,
++    interactionEffects,
++    items: refreshedInventory.items,
++    message: failed.length > 0
++      ? `已在我的农场按顺序使用 ${succeeded.length} 个${itemName}，跳过 ${failed.length} 块地`
++      : `已在我的农场按顺序使用 ${succeeded.length} 个${itemName}`,
++  };
++}
++
++// 同一农场会话内串行化，避免并发 Enter/Leave 与库存超卖。
++let mutationTail = Promise.resolve();
++
++function serializeMutation(operation) {
++  const run = mutationTail.then(operation, operation);
++  mutationTail = run.then(() => undefined, () => undefined);
++  return run;
++}
++
++function useFriendInteractionItemBatch(friendGidInput, itemIdInput, landIdsInput, propagateErrors = false) {
++  return serializeMutation(() => performFriendInteractionItemBatch(friendGidInput, itemIdInput, landIdsInput, propagateErrors));
++}
++
++function useFriendFarmInteractionItem(friendGidInput, itemIdInput, propagateErrors = false) {
++  return serializeMutation(() => performFriendFarmInteractionItem(friendGidInput, itemIdInput, propagateErrors));
++}
++
++function useSelfInteractionItemBatch(itemIdInput, landIdsInput, propagateErrors = false) {
++  return serializeMutation(() => performSelfInteractionItemBatch(itemIdInput, landIdsInput, propagateErrors));
++}
++
++module.exports = {
++  MAX_BATCH_LANDS,
++  SELF_USABLE_INTERACTION_ITEM_IDS,
++  isFriendLandInteractionMetadata,
++  isSelfLandInteractionMetadata,
++  getFriendInteractionItems,
++  getSelfInteractionItems,
++  useFriendInteractionItemBatch,
++  useFriendFarmInteractionItem,
++  useSelfInteractionItemBatch,
++};
+diff --git a/web/src/components/friends/FriendsFriendList.vue b/web/src/components/friends/FriendsFriendList.vue
+index 0e193e6..a1bfdac 100644
+--- a/web/src/components/friends/FriendsFriendList.vue
++++ b/web/src/components/friends/FriendsFriendList.vue
+@@ -1,5 +1,6 @@
+ <script setup lang="ts">
+ import FarmScene from '@/components/FarmScene.vue'
++import FriendsInteractionPanel from '@/components/friends/FriendsInteractionPanel.vue'
+ 
+ type FriendActionType = 'steal' | 'water' | 'weed' | 'bug' | 'bad'
+ 
+@@ -21,6 +22,9 @@ const props = defineProps<{
+   formatFriendGold: (value: unknown) => string
+   getFriendStatusText: (friend: any) => string
+   getFriendStatusHint: (friend: any) => string
++  interactionItems: any[]
++  interactionItemsLoading: boolean
++  interactionUsePending: boolean
+ }>()
+ 
+ const emit = defineEmits<{
+@@ -29,6 +33,8 @@ const emit = defineEmits<{
+   (e: 'toggleBlacklist', friend: any, event: Event): void
+   (e: 'removeKnownFriendGid', friend: any, event: Event): void
+   (e: 'friendAvatarError', friend: any): void
++  (e: 'useInteraction', friendId: string, itemId: string, landIds: string[]): void
++  (e: 'useFarmInteraction', friendId: string, itemId: string): void
+ }>()
+ 
+ const currentPage = defineModel<number>('currentPage', { required: true })
+@@ -153,7 +159,18 @@ function goToPage(page: number) {
+       <div v-else-if="!friendLands[friend.gid] || friendLands[friend.gid]?.length === 0" class="py-4 text-center text-gray-500">
+         当前没有返回土地数据，可稍后重试或先确认该好友农场是否可访问。
+       </div>
+-      <FarmScene v-else :lands="friendLands[friend.gid] || []" />
++      <template v-else>
++        <FarmScene :lands="friendLands[friend.gid] || []" />
++        <FriendsInteractionPanel
++          :gid="friend.gid"
++          :lands="friendLands[friend.gid] || []"
++          :items="interactionItems"
++          :loading="interactionItemsLoading"
++          :pending="interactionUsePending"
++          @use="(itemId: string, landIds: string[]) => emit('useInteraction', friend.gid, itemId, landIds)"
++          @use-farm="(itemId: string) => emit('useFarmInteraction', friend.gid, itemId)"
++        />
++      </template>
+     </div>
+   </div>
+ 
+diff --git a/web/src/components/friends/FriendsInteractionPanel.vue b/web/src/components/friends/FriendsInteractionPanel.vue
+new file mode 100644
+index 0000000..e3c7329
+--- /dev/null
++++ b/web/src/components/friends/FriendsInteractionPanel.vue
+@@ -0,0 +1,198 @@
++<script setup lang="ts">
++import { computed, ref, watch } from 'vue'
++import LandCard from '@/components/LandCard.vue'
++import { interactionItemTargetReason } from '@/utils/interaction-item-rules'
++
++const props = defineProps<{
++  gid: string | number
++  lands: any[]
++  items: any[]
++  loading: boolean
++  pending: boolean
++}>()
++
++const emit = defineEmits<{
++  (e: 'use', itemId: string, landIds: string[]): void
++  (e: 'useFarm', itemId: string): void
++}>()
++
++const selectedItemId = ref('')
++const selectedLandIds = ref<string[]>([])
++
++const landItems = computed(() => (props.items || []).filter(item => item?.targetKind !== 'farm'))
++const farmItems = computed(() => (props.items || []).filter(item => item?.targetKind === 'farm'))
++
++const selectedItem = computed(() => landItems.value.find(item => String(item.itemId) === selectedItemId.value) || null)
++
++function landReason(land: any) {
++  if (!selectedItemId.value)
++    return '请先选择道具'
++  return interactionItemTargetReason(selectedItemId.value, land)
++}
++
++function isLandAvailable(land: any) {
++  return landReason(land) === ''
++}
++
++function landKey(land: any) {
++  return String(land?.id ?? '')
++}
++
++const availableLands = computed(() => (props.lands || []).filter(land => isLandAvailable(land)))
++
++const selectedSet = computed(() => new Set(selectedLandIds.value))
++
++function toggleLand(land: any) {
++  const key = landKey(land)
++  if (!key || !isLandAvailable(land))
++    return
++  if (selectedSet.value.has(key)) {
++    selectedLandIds.value = selectedLandIds.value.filter(id => id !== key)
++  }
++  else {
++    selectedLandIds.value = [...selectedLandIds.value, key]
++  }
++}
++
++function selectAllAvailable() {
++  selectedLandIds.value = availableLands.value.map(land => landKey(land)).filter(Boolean)
++}
++
++function clearSelection() {
++  selectedLandIds.value = []
++}
++
++function handleUse() {
++  if (!selectedItemId.value || selectedLandIds.value.length === 0)
++    return
++  emit('use', selectedItemId.value, [...selectedLandIds.value])
++}
++
++function handleUseFarm(itemId: string) {
++  emit('useFarm', itemId)
++}
++
++// 道具或土地刷新后，丢掉已经失效的选择，避免提交不存在的地块。
++watch(() => [props.gid, props.items], () => {
++  const itemIds = new Set((props.items || []).map(item => String(item.itemId)))
++  if (selectedItemId.value && !itemIds.has(selectedItemId.value)) {
++    selectedItemId.value = ''
++  }
++  selectedLandIds.value = []
++})
++
++watch(selectedItemId, () => {
++  selectedLandIds.value = []
++})
++</script>
++
++<template>
++  <div class="mt-3 border border-gray-200 rounded-lg bg-white p-3 dark:border-gray-700 dark:bg-gray-800">
++    <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
++      <div class="flex items-center gap-2 text-sm text-gray-700 font-medium dark:text-gray-200">
++        <div class="i-carbon-flash" />
++        <span>互动道具</span>
++      </div>
++      <div v-if="loading" class="flex items-center gap-1 text-xs text-gray-400">
++        <div class="i-svg-spinners-90-ring-with-bg" />
++        <span>库存加载中</span>
++      </div>
++    </div>
++
++    <div v-if="!loading && items.length === 0" class="py-2 text-xs text-gray-400">
++      背包中暂无可用于好友农场的特殊互动道具。
++    </div>
++
++    <div v-else class="flex flex-col gap-3">
++      <div v-if="farmItems.length > 0" class="flex flex-wrap items-center gap-2">
++        <span class="text-xs text-gray-400">整场道具</span>
++        <button
++          v-for="item in farmItems"
++          :key="item.itemId"
++          class="flex items-center gap-1.5 border border-gray-200 rounded-full bg-gray-50 px-3 py-1.5 text-xs text-gray-700 transition dark:border-gray-600 dark:bg-gray-700/40 hover:bg-gray-100 dark:text-gray-200 disabled:opacity-50 dark:hover:bg-gray-700"
++          :disabled="pending"
++          @click="handleUseFarm(String(item.itemId))"
++        >
++          <span>{{ item.name }}</span>
++          <span class="text-gray-400">×{{ item.count }}</span>
++        </button>
++      </div>
++
++      <div v-if="landItems.length > 0" class="flex flex-col gap-2">
++        <span class="text-xs text-gray-400">土地道具（选道具后点地块，可多选）</span>
++        <div class="flex flex-wrap gap-2">
++          <button
++            v-for="item in landItems"
++            :key="item.itemId"
++            class="flex items-center gap-1.5 border rounded-full px-3 py-1.5 text-xs transition"
++            :class="String(item.itemId) === selectedItemId
++              ? 'border-transparent text-white shadow'
++              : 'border-gray-200 bg-gray-50 text-gray-700 hover:bg-gray-100 dark:border-gray-600 dark:bg-gray-700/40 dark:text-gray-200 dark:hover:bg-gray-700'"
++            :style="String(item.itemId) === selectedItemId ? { backgroundColor: 'var(--theme-primary)' } : {}"
++            @click="selectedItemId = String(item.itemId)"
++          >
++            <img v-if="item.image" :src="item.image" class="h-4 w-4 object-contain">
++            <span>{{ item.name }}</span>
++            <span :class="String(item.itemId) === selectedItemId ? 'text-white/80' : 'text-gray-400'">×{{ item.count }}</span>
++          </button>
++        </div>
++      </div>
++
++      <div v-if="selectedItem" class="flex flex-col gap-2">
++        <div class="flex flex-wrap items-center gap-2 text-xs">
++          <button
++            class="border border-gray-200 rounded bg-white px-2.5 py-1 text-gray-600 transition dark:border-gray-600 dark:bg-gray-700/40 hover:bg-gray-50 dark:text-gray-300 disabled:opacity-50 dark:hover:bg-gray-700"
++            :disabled="pending || availableLands.length === 0"
++            @click="selectAllAvailable"
++          >
++            全选可用 ({{ availableLands.length }})
++          </button>
++          <button
++            class="border border-gray-200 rounded bg-white px-2.5 py-1 text-gray-600 transition dark:border-gray-600 dark:bg-gray-700/40 hover:bg-gray-50 dark:text-gray-300 disabled:opacity-50 dark:hover:bg-gray-700"
++            :disabled="pending || selectedLandIds.length === 0"
++            @click="clearSelection"
++          >
++            清空选择
++          </button>
++          <span class="text-gray-500 dark:text-gray-400">
++            已选 {{ selectedLandIds.length }} 块地 · 库存 {{ selectedItem.count }}
++          </span>
++          <button
++            class="rounded px-3 py-1 text-white shadow transition disabled:opacity-50"
++            style="background-color: var(--theme-primary)"
++            :disabled="pending || selectedLandIds.length === 0"
++            @click="handleUse"
++          >
++            {{ pending ? '使用中…' : `使用 ${selectedLandIds.length} 个` }}
++          </button>
++        </div>
++
++        <div class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
++          <div
++            v-for="land in lands"
++            :key="landKey(land)"
++            class="relative"
++          >
++            <LandCard
++              :land="land"
++              :show-actions="false"
++              :selected="selectedSet.has(landKey(land))"
++              :selection-active="true"
++              @select="toggleLand(land)"
++            />
++            <div
++              v-if="!isLandAvailable(land)"
++              class="absolute inset-0 flex cursor-not-allowed items-center justify-center rounded-lg bg-gray-900/45 text-xs text-white"
++            >
++              {{ landReason(land) }}
++            </div>
++          </div>
++        </div>
++      </div>
++
++      <div v-else-if="landItems.length > 0" class="text-xs text-gray-400">
++        选择一个土地道具后即可点选地块。
++      </div>
++    </div>
++  </div>
++</template>
+diff --git a/web/src/stores/farm.ts b/web/src/stores/farm.ts
+index 94daa53..a5d2ecb 100644
+--- a/web/src/stores/farm.ts
++++ b/web/src/stores/farm.ts
+@@ -31,6 +31,10 @@ export const useFarmStore = defineStore('farm', () => {
+   const dogSkillGiftLoading = ref(false)
+   const dogSkillGiftError = ref('')
+ 
++  const selfInteractionItems = ref<any[]>([])
++  const selfInteractionItemsLoading = ref(false)
++  const selfInteractionUsePending = ref(false)
++
+   function clearFarmData() {
+     lands.value = []
+     seeds.value = []
+@@ -38,6 +42,7 @@ export const useFarmStore = defineStore('farm', () => {
+     weather.value = null
+     dogSkillGiftPendingCount.value = 0
+     dogSkillGiftError.value = ''
++    selfInteractionItems.value = []
+   }
+ 
+   function isCurrentAccount(accountId: string) {
+@@ -68,6 +73,53 @@ export const useFarmStore = defineStore('farm', () => {
+     }
+   }
+ 
++  async function fetchSelfInteractionItems(accountId: string) {
++    if (!accountId)
++      return
++    const requestedId = String(accountId)
++    selfInteractionItemsLoading.value = true
++    try {
++      const { data } = await api.get('/api/farm/interaction-items', {
++        headers: { 'x-account-id': accountId },
++      })
++      if (!isCurrentAccount(requestedId))
++        return
++      if (data?.ok) {
++        selfInteractionItems.value = Array.isArray(data.data?.items) ? data.data.items : []
++      }
++    }
++    catch {
++      // 道具为可选能力，加载失败不打断农场主流程。
++    }
++    finally {
++      selfInteractionItemsLoading.value = false
++    }
++  }
++
++  async function useSelfInteractionItemBatch(accountId: string, itemId: string | number, landIds: Array<string | number>) {
++    if (!accountId || !itemId)
++      return { ok: false, message: '参数无效' }
++    selfInteractionUsePending.value = true
++    try {
++      const { data } = await api.post('/api/farm/interaction-items/use-batch', { itemId, landIds }, {
++        headers: { 'x-account-id': accountId },
++        timeout: 300000,
++      })
++      const result = data?.data || {}
++      if (Array.isArray(result.items)) {
++        selfInteractionItems.value = result.items
++      }
++      await fetchLands(accountId)
++      return { ...result, ok: true }
++    }
++    catch (error: any) {
++      return { ok: false, message: error?.response?.data?.error || error?.message || '使用互动道具失败' }
++    }
++    finally {
++      selfInteractionUsePending.value = false
++    }
++  }
++
+   async function fetchSeeds(accountId: string) {
+     if (!accountId)
+       return
+@@ -175,6 +227,9 @@ export const useFarmStore = defineStore('farm', () => {
+     dogSkillGiftPendingCount,
+     dogSkillGiftLoading,
+     dogSkillGiftError,
++    selfInteractionItems,
++    selfInteractionItemsLoading,
++    selfInteractionUsePending,
+     clearFarmData,
+     fetchLands,
+     fetchSeeds,
+@@ -184,5 +239,7 @@ export const useFarmStore = defineStore('farm', () => {
+     fertilizeLand,
+     removePlant,
+     removeAllPlants,
++    fetchSelfInteractionItems,
++    useSelfInteractionItemBatch,
+   }
+ })
+diff --git a/web/src/stores/friend.ts b/web/src/stores/friend.ts
+index d8f7a26..ed930ca 100644
+--- a/web/src/stores/friend.ts
++++ b/web/src/stores/friend.ts
+@@ -15,6 +15,59 @@ export interface KnownFriendSettings {
+   friendsListCacheTtlSec: number
+ }
+ 
++/** 背包中可用于好友农场/土地的特殊互动道具。 */
++export interface FriendInteractionItemDto {
++  id: string
++  itemId: string
++  name: string
++  image: string
++  count: number
++  saleConditionSatisfiedCount: number
++  interactionType: string
++  protocol: string
++  selfUsable: boolean
++  targetKind: 'land' | 'farm'
++  description: string
++  activityId: string
++  sellCondition: string
++  nearestExpireTime: number
++  serverValidationRequired: boolean
++}
++
++/** 单块地使用道具的结果。 */
++export interface FriendInteractionResultDto {
++  landId: string
++  ok: boolean
++  code: string
++  message: string
++  target?: any
++  updatedLand?: any
++  interactionEffects?: any[]
++  consumed?: any[]
++  rewards?: any[]
++}
++
++/** 一次批量使用的汇总结果。 */
++export interface FriendInteractionBatchDto {
++  hostGid: string
++  ownerName: string
++  itemId: string
++  itemName: string
++  protocol: string
++  requestedLandIds: string[]
++  usedLandIds: string[]
++  failedLandIds: string[]
++  successCount: number
++  failureCount: number
++  results: FriendInteractionResultDto[]
++  updatedLands: any[]
++  interactionEffects: any[]
++  items: FriendInteractionItemDto[]
++  message: string
++  targetKind?: string
++  isSelf?: boolean
++}
++
+ export const useFriendStore = defineStore('friend', () => {
+   const friends = ref<any[]>([])
+   const loading = ref(false)
+@@ -32,6 +85,12 @@ export const useFriendStore = defineStore('friend', () => {
+   const knownFriendSettingsLoading = ref(false)
+   const knownFriendSettingsSaving = ref(false)
+ 
++  const interactionItems = ref<FriendInteractionItemDto[]>([])
++  const interactionItemsLoading = ref(false)
++  const interactionItemsError = ref('')
++  const interactionUsePending = ref(false)
++  const interactionUseError = ref('')
++
+   function clearFriendData() {
+     friends.value = []
+     friendLands.value = {}
+@@ -42,6 +101,9 @@ export const useFriendStore = defineStore('friend', () => {
+     knownFriendGids.value = []
+     knownFriendGidSyncCooldownSec.value = 600
+     friendsListCacheTtlSec.value = 60
++    interactionItems.value = []
++    interactionItemsError.value = ''
++    interactionUseError.value = ''
+   }
+ 
+   function isCurrentAccount(accountId: string) {
+@@ -349,6 +411,94 @@ export const useFriendStore = defineStore('friend', () => {
+     }
+   }
+ 
++  async function fetchFriendInteractionItems(accountId: string) {
++    if (!accountId)
++      return
++    const requestedId = String(accountId)
++    interactionItemsLoading.value = true
++    interactionItemsError.value = ''
++    try {
++      const res = await api.get('/api/friend-interaction-items', {
++        headers: { 'x-account-id': accountId },
++      })
++      if (!isCurrentAccount(requestedId))
++        return
++      if (res.data.ok) {
++        const payload = res.data.data || {}
++        interactionItems.value = Array.isArray(payload.items) ? payload.items : []
++      }
++      else {
++        interactionItemsError.value = res.data.error || '加载互动道具失败'
++      }
++    }
++    catch (error: any) {
++      if (isCurrentAccount(requestedId)) {
++        interactionItemsError.value = error?.response?.data?.error || error?.message || '加载互动道具失败'
++      }
++    }
++    finally {
++      interactionItemsLoading.value = false
++    }
++  }
++
++  async function useFriendInteractionItemBatch(
++    accountId: string,
++    gid: string | number,
++    itemId: string | number,
++    landIds: Array<string | number>,
++  ) {
++    if (!accountId || !gid || !itemId)
++      return { ok: false, message: '参数无效' } as FriendInteractionBatchDto & { ok: boolean, message: string }
++    interactionUsePending.value = true
++    interactionUseError.value = ''
++    try {
++      const res = await api.post(`/api/friend/${gid}/interaction-items/use-batch`, { itemId, landIds }, {
++        headers: { 'x-account-id': accountId },
++        timeout: 300000,
++      })
++      const data = res.data?.data || {}
++      if (Array.isArray(data.items)) {
++        interactionItems.value = data.items
++      }
++      await fetchFriendLands(accountId, String(gid))
++      return { ...data, ok: true } as FriendInteractionBatchDto & { ok: boolean }
++    }
++    catch (error: any) {
++      const message = error?.response?.data?.error || error?.message || '使用互动道具失败'
++      interactionUseError.value = message
++      return { ok: false, message } as FriendInteractionBatchDto & { ok: boolean, message: string }
++    }
++    finally {
++      interactionUsePending.value = false
++    }
++  }
++
++  async function useFriendFarmInteractionItem(accountId: string, gid: string | number, itemId: string | number) {
++    if (!accountId || !gid || !itemId)
++      return { ok: false, message: '参数无效' } as FriendInteractionBatchDto & { ok: boolean, message: string }
++    interactionUsePending.value = true
++    interactionUseError.value = ''
++    try {
++      const res = await api.post(`/api/friend/${gid}/interaction-items/use-farm`, { itemId }, {
++        headers: { 'x-account-id': accountId },
++        timeout: 300000,
++      })
++      const data = res.data?.data || {}
++      if (Array.isArray(data.items)) {
++        interactionItems.value = data.items
++      }
++      return { ...data, ok: true } as FriendInteractionBatchDto & { ok: boolean }
++    }
++    catch (error: any) {
++      const message = error?.response?.data?.error || error?.message || '使用互动道具失败'
++      interactionUseError.value = message
++      return { ok: false, message } as FriendInteractionBatchDto & { ok: boolean, message: string }
++    }
++    finally {
++      interactionUsePending.value = false
++    }
++  }
++
+   async function removeUnsyncedKnownFriendGids(accountId: string, gids: number[]) {
+     if (!accountId || !gids || gids.length === 0)
+       return { ok: false, removedCount: 0 }
+@@ -382,6 +532,11 @@ export const useFriendStore = defineStore('friend', () => {
+     friendsListCacheTtlSec,
+     knownFriendSettingsLoading,
+     knownFriendSettingsSaving,
++    interactionItems,
++    interactionItemsLoading,
++    interactionItemsError,
++    interactionUsePending,
++    interactionUseError,
+     clearFriendData,
+     fetchFriends,
+     fetchFriendsDogInfo,
+@@ -396,5 +551,8 @@ export const useFriendStore = defineStore('friend', () => {
+     removeKnownFriendGid,
+     batchAddKnownFriendGids,
+     removeUnsyncedKnownFriendGids,
++    fetchFriendInteractionItems,
++    useFriendInteractionItemBatch,
++    useFriendFarmInteractionItem,
+   }
+ })
+diff --git a/web/src/utils/interaction-item-rules.ts b/web/src/utils/interaction-item-rules.ts
+new file mode 100644
+index 0000000..3d4b0f2
+--- /dev/null
++++ b/web/src/utils/interaction-item-rules.ts
+@@ -0,0 +1,35 @@
++function hasItemEffect(land: any, itemId: string): boolean {
++  return (Array.isArray(land?.interactionEffects) ? land.interactionEffects : [])
++    .some((effect: any) => String(effect?.itemId || '') === itemId)
++}
++
++/**
++ * 判断某块地能否作为指定互动道具的目标。
++ * 返回空串表示可用，否则返回不可用的原因文案。
++ */
++export function interactionItemTargetReason(itemIdInput: unknown, land: any): string {
++  const itemId = String(itemIdInput || '')
++  if (!land?.unlocked || land?.occupiedByMaster || !String(land?.plantName || '').trim())
++    return '不可用'
++
++  const status = String(land?.status || '')
++  if (['locked', 'empty', 'dead'].includes(status))
++    return status === 'dead' ? '枯萎不可用' : '不可用'
++  if (['harvestable', 'stealable', 'harvested'].includes(status))
++    return '成熟不可用'
++  if (hasItemEffect(land, itemId))
++    return '已生效'
++
++  const phaseName = String(land?.phaseName || '')
++  const rarity = Number(land?.rarity || 0)
++  if ((itemId === '5003' || itemId === '5004') && phaseName.includes('种子'))
++    return '种子不可用'
++  if ((itemId === '5003' || itemId === '5004') && (rarity === 4 || rarity === 5))
++    return '天工作物不可用'
++  if (itemId === '5003' && Number(land?.plantSize || 1) !== 1)
++    return '仅限 1×1 作物'
++  if (itemId === '5003' && (Array.isArray(land?.mutantConfigIds) ? land.mutantConfigIds : []).map(String).includes('12'))
++    return '已闪电变异'
++
++  return ''
++}
+diff --git a/web/src/views/Friends.vue b/web/src/views/Friends.vue
+index f33172b..899592e 100644
+--- a/web/src/views/Friends.vue
++++ b/web/src/views/Friends.vue
+@@ -37,6 +37,9 @@ const {
+   friendsListCacheTtlSec,
+   knownFriendSettingsLoading,
+   knownFriendSettingsSaving,
++  interactionItems,
++  interactionItemsLoading,
++  interactionUsePending,
+ } = storeToRefs(friendStore)
+ const { status, loading: statusLoading, realtimeConnected, currentStatusReady } = storeToRefs(statusStore)
+ 
+@@ -248,6 +251,7 @@ async function loadData() {
+       friendStore.fetchFriends(currentAccountId.value)
+       friendStore.fetchBlacklist(currentAccountId.value)
+       friendStore.fetchInteractRecords(currentAccountId.value)
++      friendStore.fetchFriendInteractionItems(currentAccountId.value)
+       if (isQqAccount.value) {
+         friendStore.fetchKnownFriendSettings(currentAccountId.value)
+       }
+@@ -366,6 +370,44 @@ async function handleOp(friendId: string, type: string, e: Event) {
+   }
+ }
+ 
++async function handleUseInteraction(friendId: string, itemId: string, landIds: string[]) {
++  if (!currentAccountId.value || !itemId || landIds.length === 0)
++    return
++  const result: any = await friendStore.useFriendInteractionItemBatch(
++    currentAccountId.value,
++    friendId,
++    itemId,
++    landIds,
++  )
++  if (result?.ok) {
++    if (Number(result.failureCount || 0) > 0) {
++      toast.warning(result.message || `成功 ${result.successCount} 块，失败 ${result.failureCount} 块`)
++    }
++    else {
++      toast.success(result.message || `已使用 ${result.successCount} 个道具`)
++    }
++  }
++  else {
++    toast.error(result?.message || '使用互动道具失败')
++  }
++}
++
++async function handleUseFarmInteraction(friendId: string, itemId: string) {
++  if (!currentAccountId.value || !itemId)
++    return
++  const result: any = await friendStore.useFriendFarmInteractionItem(
++    currentAccountId.value,
++    friendId,
++    itemId,
++  )
++  if (result?.ok) {
++    toast.success(result.message || '已在好友农场使用道具')
++  }
++  else {
++    toast.error(result?.message || '使用互动道具失败')
++  }
++}
++
+ async function handleToggleBlacklist(friend: any, e: Event) {
+   e.stopPropagation()
+   if (!currentAccountId.value)
+@@ -765,11 +807,16 @@ async function handleBatchAddKnownFriendGids() {
+             :format-friend-gold="formatFriendGold"
+             :get-friend-status-text="getFriendStatusText"
+             :get-friend-status-hint="getFriendStatusHint"
++            :interaction-items="interactionItems"
++            :interaction-items-loading="interactionItemsLoading"
++            :interaction-use-pending="interactionUsePending"
+             @toggle-friend="toggleFriend"
+             @operate="handleOp"
+             @toggle-blacklist="handleToggleBlacklist"
+             @remove-known-friend-gid="handleRemoveKnownFriendGid"
+             @friend-avatar-error="handleFriendAvatarError"
++            @use-interaction="handleUseInteraction"
++            @use-farm-interaction="handleUseFarmInteraction"
+           />
+         </template>
+       </div>
+diff --git a/web/src/views/Personal.vue b/web/src/views/Personal.vue
+index fcefea9..e9e203d 100644
+--- a/web/src/views/Personal.vue
++++ b/web/src/views/Personal.vue
+@@ -1,68 +1,113 @@
+ <script setup lang="ts">
+-import { ref } from 'vue'
++import { storeToRefs } from 'pinia'
++import { computed, ref, watch } from 'vue'
+ import BagPanel from '@/components/BagPanel.vue'
+ import FarmPanel from '@/components/FarmPanel.vue'
+ import TaskPanel from '@/components/TaskPanel.vue'
++import FriendsInteractionPanel from '@/components/friends/FriendsInteractionPanel.vue'
++import { useAccountStore } from '@/stores/account'
++import { useFarmStore } from '@/stores/farm'
++import { useToastStore } from '@/stores/toast'
+ 
+-const currentTab = ref<'farm' | 'bag' | 'task'>('farm')
++type PersonalTab = 'farm' | 'interaction' | 'bag' | 'task'
++
++const currentTab = ref<PersonalTab>('farm')
++
++const accountStore = useAccountStore()
++const farmStore = useFarmStore()
++const toast = useToastStore()
++const { currentAccountId } = storeToRefs(accountStore)
++const {
++  lands,
++  selfInteractionItems,
++  selfInteractionItemsLoading,
++  selfInteractionUsePending,
++} = storeToRefs(farmStore)
++
++const TABS: Array<{ key: PersonalTab, label: string, icon: string }> = [
++  { key: 'farm', label: '我的农场', icon: 'i-carbon-sprout' },
++  { key: 'interaction', label: '互动道具', icon: 'i-carbon-flash' },
++  { key: 'bag', label: '我的背包', icon: 'i-carbon-box' },
++  { key: 'task', label: '我的任务', icon: 'i-carbon-task' },
++]
++
++// 已访问过的页签保持挂载，切回来时保留滚动位置与加载状态。
++const visitedTabs = ref<PersonalTab[]>(['farm'])
++
++watch(currentTab, (tab) => {
++  if (!visitedTabs.value.includes(tab))
++    visitedTabs.value.push(tab)
++})
++
++async function handleUseInteraction(itemId: string, landIds: string[]) {
++  if (!currentAccountId.value || !itemId || landIds.length === 0)
++    return
++  const result: any = await farmStore.useSelfInteractionItemBatch(currentAccountId.value, itemId, landIds)
++  if (result?.ok) {
++    if (Number(result.failureCount || 0) > 0) {
++      toast.warning(result.message || `成功 ${result.successCount} 块，失败 ${result.failureCount} 块`)
++    }
++    else {
++      toast.success(result.message || `已使用 ${result.successCount} 个道具`)
++    }
++  }
++  else {
++    toast.error(result?.message || '使用互动道具失败')
++  }
++}
++
++function loadInteractionItems() {
++  if (currentAccountId.value) {
++    farmStore.fetchSelfInteractionItems(currentAccountId.value)
++  }
++}
++
++watch(currentTab, (tab) => {
++  if (tab === 'interaction')
++    loadInteractionItems()
++}, { immediate: true })
++
++const interactionLoading = computed(() => selfInteractionItemsLoading.value || selfInteractionUsePending.value)
+ </script>
+ 
+ <template>
+   <div class="h-full flex flex-col p-4">
+-    <div class="mb-4 flex space-x-2">
++    <div class="mb-4 flex flex-wrap gap-2">
+       <button
++        v-for="tab in TABS"
++        :key="tab.key"
+         class="rounded-lg px-4 py-2 font-medium transition-colors"
+-        :class="currentTab === 'farm'
++        :class="currentTab === tab.key
+           ? 'text-white shadow-md'
+           : 'bg-white text-gray-600 hover:bg-gray-100 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'"
+-        :style="currentTab === 'farm' ? { backgroundColor: 'var(--theme-primary)' } : {}"
+-        @click="currentTab = 'farm'"
++        :style="currentTab === tab.key ? { backgroundColor: 'var(--theme-primary)' } : {}"
++        @click="currentTab = tab.key"
+       >
+-        <div class="flex items-center space-x-2">
+-          <div class="i-carbon-sprout text-lg" />
+-          <span>我的农场</span>
+-        </div>
+-      </button>
+-      <button
+-        class="rounded-lg px-4 py-2 font-medium transition-colors"
+-        :class="currentTab === 'bag'
+-          ? 'text-white shadow-md'
+-          : 'bg-white text-gray-600 hover:bg-gray-100 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'"
+-        :style="currentTab === 'bag' ? { backgroundColor: 'var(--theme-primary)' } : {}"
+-        @click="currentTab = 'bag'"
+-      >
+-        <div class="flex items-center space-x-2">
+-          <div class="i-carbon-box text-lg" />
+-          <span>我的背包</span>
+-        </div>
+-      </button>
+-      <button
+-        class="rounded-lg px-4 py-2 font-medium transition-colors"
+-        :class="currentTab === 'task'
+-          ? 'text-white shadow-md'
+-          : 'bg-white text-gray-600 hover:bg-gray-100 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'"
+-        :style="currentTab === 'task' ? { backgroundColor: 'var(--theme-primary)' } : {}"
+-        @click="currentTab = 'task'"
+-      >
+-        <div class="flex items-center space-x-2">
+-          <div class="i-carbon-task text-lg" />
+-          <span>我的任务</span>
++        <div class="flex items-center gap-2">
++          <div :class="tab.icon" class="text-lg" />
++          <span>{{ tab.label }}</span>
+         </div>
+       </button>
+     </div>
+ 
+     <div class="flex-1 overflow-hidden overflow-y-auto">
+-      <Transition
+-        mode="out-in"
+-        enter-active-class="transition duration-200 ease-out"
+-        enter-from-class="transform opacity-0 scale-95"
+-        enter-to-class="transform opacity-100 scale-100"
+-        leave-active-class="transition duration-150 ease-in"
+-        leave-from-class="transform opacity-100 scale-100"
+-        leave-to-class="transform opacity-0 scale-95"
+-      >
+-        <component :is="currentTab === 'farm' ? FarmPanel : (currentTab === 'bag' ? BagPanel : TaskPanel)" />
+-      </Transition>
++      <div v-for="tab in visitedTabs" v-show="tab === currentTab" :key="tab">
++        <FarmPanel v-if="tab === 'farm'" />
++
++        <div v-else-if="tab === 'interaction'" class="p-1">
++          <FriendsInteractionPanel
++            gid="self"
++            :lands="lands"
++            :items="selfInteractionItems"
++            :loading="interactionLoading"
++            :pending="selfInteractionUsePending"
++            @use="handleUseInteraction"
++          />
++        </div>
++
++        <BagPanel v-else-if="tab === 'bag'" />
++        <TaskPanel v-else-if="tab === 'task'" />
++      </div>
+     </div>
+   </div>
+ </template>
+-- 
+2.55.0.windows.3
+

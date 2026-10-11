@@ -154,6 +154,12 @@ async function loadProto() {
     types.ClaimShareRewardReply = root.lookupType('gamepb.sharepb.ClaimShareRewardReply');
     types.GetIllustratedListV2Request = root.lookupType('gamepb.illustratedpb.GetIllustratedListV2Request');
     types.GetIllustratedListV2Reply = root.lookupType('gamepb.illustratedpb.GetIllustratedListV2Reply');
+    types.GetIllustratedLevelListV2Request = root.lookupType('gamepb.illustratedpb.GetIllustratedLevelListV2Request');
+    types.GetIllustratedLevelListV2Reply = root.lookupType('gamepb.illustratedpb.GetIllustratedLevelListV2Reply');
+    types.ClearNewUnlockedFruitsV2Request = root.lookupType('gamepb.illustratedpb.ClearNewUnlockedFruitsV2Request');
+    types.ClearNewUnlockedFruitsV2Reply = root.lookupType('gamepb.illustratedpb.ClearNewUnlockedFruitsV2Reply');
+    // 天气变化推送（WeatherStatus 类型见下方 weatherpb 注册处）
+    types.WeatherChangeNotify = root.lookupType('gamepb.weatherpb.WeatherChangeNotify');
     types.ClaimAllRewardsV2Request = root.lookupType('gamepb.illustratedpb.ClaimAllRewardsV2Request');
     types.ClaimAllRewardsV2Reply = root.lookupType('gamepb.illustratedpb.ClaimAllRewardsV2Reply');
     types.CoreItem = root.lookupType('corepb.Item');
@@ -168,6 +174,19 @@ async function loadProto() {
     types.ActivityOperateReply = root.lookupType('gamepb.activitypb.OperateReply');
     // 萌宠成长日记（S3）操作协议，来自官方小程序 1.14.0.1 编码器
     for (const name of ['PetDiaryOperateRequest', 'PetDiaryOperateReply', 'PetDiaryGetGroupReply']) {
+        types[name] = root.lookupType(`gamepb.activitypb.${name}`);
+    }
+    // 雨落成诗（天气活动）协议。GetGroup 系列本地已有 Activity* 别名，这里同时补上游同名别名，
+    // 使 services/weather-activity.js 可以直接沿用上游的 types 名称。
+    types.GetGroupRequest = types.ActivityGetGroupRequest;
+    types.GetGroupReply = types.ActivityGetGroupReply;
+    for (const name of [
+        'CollectWeatherRequest',
+        'AdvanceWeatherResearchRequest',
+        'WeatherBottleConfig',
+        'WeatherResearchData',
+        'WeatherActivityTasks',
+    ]) {
         types[name] = root.lookupType(`gamepb.activitypb.${name}`);
     }
     types.ActivityRandomShopInfo = root.lookupType('gamepb.activitypb.RandomShopInfo');

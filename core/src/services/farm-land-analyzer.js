@@ -773,10 +773,34 @@ function getQixiDewStatus(plant) {
   };
 }
 
-async function getLandsDetail() {
+/**
+ * 读取当前账号的职业（收获/偷取）快照，失败时返回 null。
+ * 职业信息属于附加展示，不应因为一次失败让整个土地接口不可用。
+ */
+async function resolveOwnCareerInfo() {
+  try {
+    // 懒加载：network 依赖较深，避免在模块顶层引入可能的循环依赖。
+    const { getUserState } = require('../utils/network');
+    const state = getUserState() || {};
+    const gid = toNum(state.gid);
+    if (gid <= 0) {
+      logWarn('土地', `职业信息跳过：userState.gid 无效 (${state.gid})`);
+      return null;
+    }
+    const { getCareerInfo } = require('./career');
+    return await getCareerInfo(gid);
+  } catch (error) {
+    logWarn('土地', `职业信息读取失败，本轮忽略: ${(error && error.message) || error}`);
+    return null;
+  }
+}
+
+async function getLandsDetail(propagateErrors = false) {
   try {
     const landsReply = await getAllLands();
-    const result = { lands: [], summary: {} };
+    const socialEvents = buildFarmSocialEventDetails(landsReply);
+    const career = await resolveOwnCareerInfo();
+    const result = { lands: [], summary: {}, socialEvents, career };
     if (!landsReply.lands) return result;
 
     const serverTime = getServerTimeSec();
@@ -913,9 +937,10 @@ async function getLandsDetail() {
       });
     }
 
-    return { lands: details, summary: summarizeLandDetails(details) };
-  } catch {
-    return { lands: [], summary: {} };
+    return { lands: details, summary: summarizeLandDetails(details), socialEvents, career };
+  } catch (error) {
+    if (propagateErrors) throw error;
+    return { lands: [], summary: {}, socialEvents: [], career: null };
   }
 }
 

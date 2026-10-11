@@ -1,5 +1,7 @@
 const {
   getFruitLayerByFruitId,
+  getIllustratedSortByParam,
+  getIllustratedTypeByParam,
   getItemById,
   getItemImageById,
   getPlantByFruitId,
@@ -8,6 +10,18 @@ const { getNongmeSeedImageUrl } = require("../services/nongme-plant-data");
 const { toNum } = require("../utils/utils");
 
 const SEED_SHOP_TYPE = 2;
+
+/**
+ * 按图鉴配置推导超变图鉴子分组：
+ * 装扮果实 → decoration，活动果实 → activity，其余（黄金果实等）→ gold
+ * 与上游 core/src/services/illustrated.ts 的 getMutantGroup 保持一致。
+ */
+function getMutantGroup(seedId) {
+  const type = getIllustratedTypeByParam(seedId);
+  if (type === "装扮果实") return "decoration";
+  if (type === "活动果实") return "activity";
+  return "gold";
+}
 
 function getUserLevel(provider, accountId) {
   const status = provider.getStatus(accountId);
@@ -127,6 +141,9 @@ function buildIllustratedItem(
     goodsId,
     price,
     seedLevel,
+    // 超变图鉴按 group 分子组显示，sort 决定组内顺序
+    group: getMutantGroup(fruitId),
+    sort: getIllustratedSortByParam(fruitId),
   };
 }
 

@@ -1,0 +1,630 @@
+From 4e22115ee06eeb04708899be119fc7a44c965738 Mon Sep 17 00:00:00 2001
+From: xxxscarlxrd404 <136799429@qq.com>
+Date: Sun, 11 Oct 2026 05:25:06 +0800
+Subject: [PATCH 2/2] =?UTF-8?q?feat:=20=E8=A1=A5=E9=BD=90=E4=BA=92?=
+ =?UTF-8?q?=E5=8A=A8=E9=81=93=E5=85=B7=E9=85=8D=E7=BD=AE=E5=B9=B6=E9=9B=86?=
+ =?UTF-8?q?=E6=88=90=E5=88=B0=E4=B8=AA=E4=BA=BA=E9=A1=B5=E4=B8=8E=E5=A5=BD?=
+ =?UTF-8?q?=E5=8F=8B=E9=A1=B5?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+上一版完成了互动道具的全链路代码，但界面上始终看不到入口：本地
+ItemInfo.json 只有 647 项且不含任何 type=23 的道具元数据，导致
+isFriendLandInteractionMetadata 判定恒不命中，库存列表永远是空的。
+
+配置核对与合并
+- 对比上游 ItemInfo.json（793 项 / 11 个 type=23 道具）与本地（647 项 / 0 个）
+- 按项目既有约定做受控合并，不整份替换：
+  - 缺失的互动道具条目新增（5001-5006、6001、6002、301101）
+  - 本地已有的 301102 足球 / 301103 鹊羽灵露补齐互动元数据
+    （type / can_use / interaction_type / desc 等）
+  - 本地独有的 8 个植物类条目原样保留
+  - 不覆盖任何既有条目的 price / price_id 承重字段
+- 合并前校验：待补 ID 均不在本地 Plant.json 的 seed_id 中，
+  不会影响 getSeedLevel 的派生结果
+
+前端调整
+- 互动道具面板由 friends 专用改为通用组件 InteractionItemPanel.vue，
+  好友页与个人页共用
+- 个人页不再单独挂「互动道具」页签，改为集成进「我的农场」面板内部，
+  与上游入口位置一致
+- 个人页保留已访问页签缓存，切回时保留滚动位置与加载状态
+
+验证：接口实测返回 301102 足球 x16、301101 黄金虫 x13；
+core 394 项测试无新增失败；web 类型检查与生产构建通过。
+---
+ core/src/gameConfig/ItemInfo.json             | 333 +++++++++++++++++-
+ web/src/components/FarmPanel.vue              |  54 ++-
+ ...tionPanel.vue => InteractionItemPanel.vue} |   0
+ .../components/friends/FriendsFriendList.vue  |   4 +-
+ web/src/views/Personal.vue                    |  67 +---
+ 5 files changed, 382 insertions(+), 76 deletions(-)
+ rename web/src/components/{friends/FriendsInteractionPanel.vue => InteractionItemPanel.vue} (100%)
+
+diff --git a/core/src/gameConfig/ItemInfo.json b/core/src/gameConfig/ItemInfo.json
+index a6b8bf2..b4ea2a5 100644
+--- a/core/src/gameConfig/ItemInfo.json
++++ b/core/src/gameConfig/ItemInfo.json
+@@ -15108,16 +15108,63 @@
+   },
+   {
+     "id": 301102,
+-    "type": 0,
++    "type": 23,
+     "name": "足球",
+-    "asset_name": "gui/texture/activity/WorldCup/img_football1"
++    "interaction_type": "additemuseItem",
++    "sells": null,
++    "sell_cond": null,
++    "cond_sells": null,
++    "level": 1,
++    "target_id": null,
++    "asset_name": null,
++    "icon_res": "gui/texture/icon/icon_football/spriteFrame",
++    "max_count": 99999,
++    "max_own": 999990,
++    "duration": null,
++    "can_use": 1,
++    "desc": "在好友农场放置可获得30经验，仅限好友本人清除，可获得金豆奖励，通过足球狂欢季活动获取。",
++    "effectDesc": "通过足球狂欢季活动获取，在好友农场放置可获得30经验。",
++    "trait_id ": null,
++    "layer": null,
++    "rarity": 2,
++    "rarity_color": "A8C1F4",
++    "jumps": "[83]",
++    "warehouse_jumps": null,
++    "jumps_dtype": null,
++    "ware_scale": null,
++    "activity_id": 2026071501,
++    "to_see": null,
++    "extra_show": null
+   },
+   {
+     "id": 301103,
+-    "type": 0,
++    "type": 23,
+     "name": "鹊羽灵露",
+-    "interaction_type": "use",
+-    "asset_name": "qixi_dew"
++    "interaction_type": "additemuseItem",
++    "sells": null,
++    "sell_cond": "活动结束后:2026081801",
++    "cond_sells": "1001:100",
++    "level": 1,
++    "target_id": null,
++    "asset_name": null,
++    "icon_res": "gui/texture/icon/icon_qixi_water/spriteFrame",
++    "max_count": 99999,
++    "max_own": 999990,
++    "duration": null,
++    "can_use": 1,
++    "desc": "鹊桥寄情活动期间，可在自己或好友农场使用，使用时立即获得1根鹊羽，农场主人收获作物时可获得一定数量的鹊羽，2品及品以下作物不可使用。",
++    "effectDesc": "鹊桥寄情活动期间内，可在自己或好友农场使用。",
++    "trait_id ": null,
++    "layer": null,
++    "rarity": 2,
++    "rarity_color": "A8C1F4",
++    "jumps": null,
++    "warehouse_jumps": null,
++    "jumps_dtype": null,
++    "ware_scale": null,
++    "activity_id": 2026081801,
++    "to_see": null,
++    "extra_show": null
+   },
+   {
+     "id": 1040025,
+@@ -16758,8 +16805,8 @@
+     "activity_id": null,
+     "to_see": null,
+     "extra_show": null
+-  }
+-  ,{
++  },
++  {
+     "id": 1046030,
+     "type": 17,
+     "name": "黄金·月下美人",
+@@ -16773,5 +16820,275 @@
+     "rarity": 3,
+     "rarity_color": "B09DED",
+     "jumps": "[97]"
++  },
++  {
++    "id": 5001,
++    "type": 23,
++    "name": "天气采集瓶",
++    "interaction_type": null,
++    "sells": null,
++    "sell_cond": "道具过期后:expire_time",
++    "cond_sells": "1001:1000",
++    "level": null,
++    "target_id": null,
++    "asset_name": null,
++    "icon_res": "gui/texture/icon/icon_weatherBottle_1/spriteFrame",
++    "max_count": 999,
++    "max_own": 999,
++    "duration": null,
++    "can_use": 1,
++    "desc": "雨落成诗活动道具，在有雷雨天的好友农场使用，可获得雷雨召唤瓶。",
++    "effectDesc": "在雷雨状态的好友家使用可得雷雨召唤瓶。",
++    "trait_id ": null,
++    "layer": null,
++    "rarity": 4,
++    "rarity_color": "D1A21E",
++    "jumps": "[81]",
++    "warehouse_jumps": null,
++    "jumps_dtype": null,
++    "ware_scale": null,
++    "activity_id": 2026070303,
++    "to_see": null,
++    "extra_show": null
++  },
++  {
++    "id": 5002,
++    "type": 23,
++    "name": "雷雨召唤瓶",
++    "interaction_type": null,
++    "sells": null,
++    "sell_cond": "道具过期后:expire_time",
++    "cond_sells": "1001:10000",
++    "level": null,
++    "target_id": null,
++    "asset_name": null,
++    "icon_res": "gui/texture/icon/icon_weatherBottle_2/spriteFrame",
++    "max_count": 999,
++    "max_own": 999,
++    "duration": null,
++    "can_use": 1,
++    "desc": "雨落成诗活动道具，在自己农场使用，可召唤一场持续2小时的雷雨。",
++    "effectDesc": "可召唤一场持续2小时的雷雨。",
++    "trait_id ": null,
++    "layer": null,
++    "rarity": 4,
++    "rarity_color": "D1A21E",
++    "jumps": "[83]",
++    "warehouse_jumps": null,
++    "jumps_dtype": null,
++    "ware_scale": null,
++    "activity_id": 2026070303,
++    "to_see": null,
++    "extra_show": null
++  },
++  {
++    "id": 5003,
++    "type": 23,
++    "name": "闪电变异瓶",
++    "interaction_type": "additemuseItem",
++    "sells": null,
++    "sell_cond": "道具过期后:expire_time",
++    "cond_sells": "1001:10000",
++    "level": null,
++    "target_id": null,
++    "asset_name": null,
++    "icon_res": "gui/texture/icon/icon_weatherBottle_3/spriteFrame",
++    "max_count": 999,
++    "max_own": 999,
++    "duration": null,
++    "can_use": 1,
++    "desc": "雨落成诗活动道具，使未成熟的作物立即发生闪电变异，种子、枯萎阶段和天工作物不可用。",
++    "effectDesc": "<outline color=#3194CB width=2 ><b>使未成熟的1*1作物立即发生<color=#c6ff00>闪电变异</color>。</b></outline>",
++    "trait_id ": null,
++    "layer": null,
++    "rarity": 4,
++    "rarity_color": "D1A21E",
++    "jumps": "[82]",
++    "warehouse_jumps": null,
++    "jumps_dtype": null,
++    "ware_scale": null,
++    "activity_id": null,
++    "to_see": null,
++    "extra_show": null
++  },
++  {
++    "id": 5004,
++    "type": 23,
++    "name": "霹雳引雷瓶",
++    "interaction_type": "additemuseItem",
++    "sells": null,
++    "sell_cond": "道具过期后:expire_time",
++    "cond_sells": "1001:10000",
++    "level": null,
++    "target_id": null,
++    "asset_name": null,
++    "icon_res": "gui/texture/icon/icon_weatherBottle_4/spriteFrame",
++    "max_count": 999,
++    "max_own": 999,
++    "duration": null,
++    "can_use": 1,
++    "desc": "雨落成诗活动道具，使好友的作物变成雷击木，售价x1.5倍！双方各得雷纹礼盒*1。天工作物，以及处于种子、成熟、枯萎阶段或已变为雷击木的作物，无法使用。",
++    "effectDesc": "<outline color=#3194CB width=2 ><b>使好友的作物变成雷击木，<color=#c6ff00>售价x1.5倍</color>！</b></outline>",
++    "trait_id ": null,
++    "layer": null,
++    "rarity": 4,
++    "rarity_color": "D1A21E",
++    "jumps": "[82]",
++    "warehouse_jumps": null,
++    "jumps_dtype": null,
++    "ware_scale": null,
++    "activity_id": null,
++    "to_see": null,
++    "extra_show": null
++  },
++  {
++    "id": 5005,
++    "type": 23,
++    "name": "青蛙使坏瓶",
++    "interaction_type": null,
++    "sells": null,
++    "sell_cond": "道具过期后:expire_time",
++    "cond_sells": "1001:100",
++    "level": null,
++    "target_id": null,
++    "asset_name": null,
++    "icon_res": "gui/texture/icon/icon_weatherBottle_5/spriteFrame",
++    "max_count": 999,
++    "max_own": 999,
++    "duration": null,
++    "can_use": 1,
++    "desc": "雨落成诗活动道具，在好友农场放出一只捣乱的小青蛙，可得30经验。",
++    "effectDesc": "在好友农场放出一只小青蛙。",
++    "trait_id ": null,
++    "layer": null,
++    "rarity": 3,
++    "rarity_color": "B09DED",
++    "jumps": "[82]",
++    "warehouse_jumps": null,
++    "jumps_dtype": null,
++    "ware_scale": null,
++    "activity_id": 2026070303,
++    "to_see": null,
++    "extra_show": null
++  },
++  {
++    "id": 5006,
++    "type": 23,
++    "name": "乌云使坏瓶",
++    "interaction_type": "additemuseItem",
++    "sells": null,
++    "sell_cond": "道具过期后:expire_time",
++    "cond_sells": "1001:100",
++    "level": null,
++    "target_id": null,
++    "asset_name": null,
++    "icon_res": "gui/texture/icon/icon_weatherBottle_6/spriteFrame",
++    "max_count": 999,
++    "max_own": 999,
++    "duration": null,
++    "can_use": 1,
++    "desc": "雨落成诗活动道具，在好友作物上放出一朵乌云，可得30经验。",
++    "effectDesc": "在好友作物上放出一朵乌云。",
++    "trait_id ": null,
++    "layer": null,
++    "rarity": 3,
++    "rarity_color": "B09DED",
++    "jumps": "[82]",
++    "warehouse_jumps": null,
++    "jumps_dtype": null,
++    "ware_scale": null,
++    "activity_id": 2026070303,
++    "to_see": null,
++    "extra_show": null
++  },
++  {
++    "id": 6001,
++    "type": 23,
++    "name": "烟花·玉兔望月",
++    "interaction_type": null,
++    "sells": null,
++    "sell_cond": null,
++    "cond_sells": null,
++    "level": null,
++    "target_id": null,
++    "asset_name": null,
++    "icon_res": "gui/texture/icon/icon_use_firework_1/spriteFrame",
++    "max_count": 999,
++    "max_own": 999,
++    "duration": null,
++    "can_use": 1,
++    "desc": "使用后可在自己农场或好友农场放置玉兔望月烟花桶，放置烟花桶可获得30点经验，烟花桶仅农场主可点燃。",
++    "effectDesc": "放置烟花道具",
++    "trait_id ": null,
++    "layer": null,
++    "rarity": 3,
++    "rarity_color": "B09DED",
++    "jumps": "[97]",
++    "warehouse_jumps": null,
++    "jumps_dtype": null,
++    "ware_scale": null,
++    "activity_id": null,
++    "to_see": null,
++    "extra_show": null
++  },
++  {
++    "id": 301101,
++    "type": 23,
++    "name": "黄金虫",
++    "interaction_type": "additemuseItem",
++    "sells": null,
++    "sell_cond": null,
++    "cond_sells": null,
++    "level": 1,
++    "target_id": null,
++    "asset_name": null,
++    "icon_res": "gui/texture/icon/icon_bug_golden/spriteFrame",
++    "max_count": 99999,
++    "max_own": 999990,
++    "duration": null,
++    "can_use": 1,
++    "desc": "在好友农场放置可获得30经验，仅限好友本人清除，可获得相同奖励。",
++    "effectDesc": "在好友农场放置可获得30经验，仅限好友本人清除，可获得相同奖励。",
++    "trait_id ": null,
++    "layer": null,
++    "rarity": 2,
++    "rarity_color": "A8C1F4",
++    "jumps": "[83]",
++    "warehouse_jumps": null,
++    "jumps_dtype": null,
++    "ware_scale": null,
++    "activity_id": null,
++    "to_see": null,
++    "extra_show": null
++  },
++  {
++    "id": 6002,
++    "type": 23,
++    "name": "烟花·花好月圆",
++    "interaction_type": null,
++    "sells": null,
++    "sell_cond": null,
++    "cond_sells": null,
++    "level": null,
++    "target_id": null,
++    "asset_name": null,
++    "icon_res": "gui/texture/icon/icon_use_firework_2/spriteFrame",
++    "max_count": 999,
++    "max_own": 999,
++    "duration": null,
++    "can_use": 1,
++    "desc": "使用后可在自己农场或好友农场放置花好月圆烟花桶，放置烟花桶可获得30点经验，烟花桶仅农场主可点燃。",
++    "effectDesc": "放置烟花道具",
++    "trait_id ": null,
++    "layer": null,
++    "rarity": 3,
++    "rarity_color": "B09DED",
++    "jumps": "[31]",
++    "warehouse_jumps": null,
++    "jumps_dtype": null,
++    "ware_scale": null,
++    "activity_id": null,
++    "to_see": null,
++    "extra_show": null
+   }
+-]
++]
+\ No newline at end of file
+diff --git a/web/src/components/FarmPanel.vue b/web/src/components/FarmPanel.vue
+index cfb646e..fe7c998 100644
+--- a/web/src/components/FarmPanel.vue
++++ b/web/src/components/FarmPanel.vue
+@@ -2,21 +2,51 @@
+ import { useIntervalFn } from '@vueuse/core'
+ import { storeToRefs } from 'pinia'
+ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+-import ConfirmModal from '@/components/ConfirmModal.vue'
+-import FarmScene from '@/components/FarmScene.vue'
+ import { useAccountStore } from '@/stores/account'
+ import { useFarmStore } from '@/stores/farm'
+ import { useStatusStore } from '@/stores/status'
++import { useToastStore } from '@/stores/toast'
++import ConfirmModal from '@/components/ConfirmModal.vue'
++import FarmScene from '@/components/FarmScene.vue'
++import InteractionItemPanel from '@/components/InteractionItemPanel.vue'
+ 
+ const farmStore = useFarmStore()
+ const accountStore = useAccountStore()
+ const statusStore = useStatusStore()
+-const { lands, summary, weather, loading, dogSkillGiftPendingCount, dogSkillGiftLoading, dogSkillGiftError } = storeToRefs(farmStore)
++const toast = useToastStore()
++const {
++  lands,
++  summary,
++  weather,
++  loading,
++  dogSkillGiftPendingCount,
++  dogSkillGiftLoading,
++  dogSkillGiftError,
++  selfInteractionItems,
++  selfInteractionItemsLoading,
++  selfInteractionUsePending,
++} = storeToRefs(farmStore)
+ const { currentAccountId, currentAccount } = storeToRefs(accountStore)
+ const { status, loading: statusLoading, realtimeConnected, currentStatusReady } = storeToRefs(statusStore)
+ 
+ const operating = ref(false)
+ const farmLoaded = ref(false)
++const interactionPanelVisible = ref(false)
++
++async function handleSelfUseInteraction(itemId: string, landIds: string[]) {
++  if (!currentAccountId.value || !itemId || landIds.length === 0)
++    return
++  const result: any = await farmStore.useSelfInteractionItemBatch(currentAccountId.value, itemId, landIds)
++  if (result?.ok) {
++    if (Number(result.failureCount || 0) > 0)
++      toast.warning(result.message || `成功 ${result.successCount} 块，失败 ${result.failureCount} 块`)
++    else
++      toast.success(result.message || `已使用 ${result.successCount} 个道具`)
++  }
++  else {
++    toast.error(result?.message || '使用互动道具失败')
++  }
++}
+ const confirmVisible = ref(false)
+ const farmViewport = ref<HTMLElement | null>(null)
+ const farmStageWidth = ref<number | null>(null)
+@@ -266,6 +296,15 @@ onUnmounted(() => {
+             <div class="i-carbon-trash-can" />
+             一键铲除
+           </button>
++          <button
++            v-if="selfInteractionItems.length > 0"
++            class="flex items-center justify-center gap-1.5 rounded bg-amber-600 px-3 py-2 text-sm text-white transition hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-50"
++            :disabled="operating"
++            @click="interactionPanelVisible = !interactionPanelVisible"
++          >
++            <div class="i-carbon-game-console" />
++            互动道具
++          </button>
+         </div>
+       </div>
+ 
+@@ -344,6 +383,15 @@ onUnmounted(() => {
+         </div>
+ 
+         <div v-else>
++          <InteractionItemPanel
++            v-if="interactionPanelVisible"
++            gid="self"
++            :lands="lands"
++            :items="selfInteractionItems"
++            :loading="selfInteractionItemsLoading"
++            :pending="selfInteractionUsePending"
++            @use="handleSelfUseInteraction"
++          />
+           <div ref="farmViewport">
+             <FarmScene
+               :lands="lands"
+diff --git a/web/src/components/friends/FriendsInteractionPanel.vue b/web/src/components/InteractionItemPanel.vue
+similarity index 100%
+rename from web/src/components/friends/FriendsInteractionPanel.vue
+rename to web/src/components/InteractionItemPanel.vue
+diff --git a/web/src/components/friends/FriendsFriendList.vue b/web/src/components/friends/FriendsFriendList.vue
+index a1bfdac..b8ea1e0 100644
+--- a/web/src/components/friends/FriendsFriendList.vue
++++ b/web/src/components/friends/FriendsFriendList.vue
+@@ -1,6 +1,6 @@
+ <script setup lang="ts">
+ import FarmScene from '@/components/FarmScene.vue'
+-import FriendsInteractionPanel from '@/components/friends/FriendsInteractionPanel.vue'
++import InteractionItemPanel from '@/components/InteractionItemPanel.vue'
+ 
+ type FriendActionType = 'steal' | 'water' | 'weed' | 'bug' | 'bad'
+ 
+@@ -161,7 +161,7 @@ function goToPage(page: number) {
+       </div>
+       <template v-else>
+         <FarmScene :lands="friendLands[friend.gid] || []" />
+-        <FriendsInteractionPanel
++        <InteractionItemPanel
+           :gid="friend.gid"
+           :lands="friendLands[friend.gid] || []"
+           :items="interactionItems"
+diff --git a/web/src/views/Personal.vue b/web/src/views/Personal.vue
+index e9e203d..31ff932 100644
+--- a/web/src/views/Personal.vue
++++ b/web/src/views/Personal.vue
+@@ -1,32 +1,15 @@
+ <script setup lang="ts">
+-import { storeToRefs } from 'pinia'
+-import { computed, ref, watch } from 'vue'
++import { ref, watch } from 'vue'
+ import BagPanel from '@/components/BagPanel.vue'
+ import FarmPanel from '@/components/FarmPanel.vue'
+ import TaskPanel from '@/components/TaskPanel.vue'
+-import FriendsInteractionPanel from '@/components/friends/FriendsInteractionPanel.vue'
+-import { useAccountStore } from '@/stores/account'
+-import { useFarmStore } from '@/stores/farm'
+-import { useToastStore } from '@/stores/toast'
+ 
+-type PersonalTab = 'farm' | 'interaction' | 'bag' | 'task'
++type PersonalTab = 'farm' | 'bag' | 'task'
+ 
+ const currentTab = ref<PersonalTab>('farm')
+ 
+-const accountStore = useAccountStore()
+-const farmStore = useFarmStore()
+-const toast = useToastStore()
+-const { currentAccountId } = storeToRefs(accountStore)
+-const {
+-  lands,
+-  selfInteractionItems,
+-  selfInteractionItemsLoading,
+-  selfInteractionUsePending,
+-} = storeToRefs(farmStore)
+-
+ const TABS: Array<{ key: PersonalTab, label: string, icon: string }> = [
+   { key: 'farm', label: '我的农场', icon: 'i-carbon-sprout' },
+-  { key: 'interaction', label: '互动道具', icon: 'i-carbon-flash' },
+   { key: 'bag', label: '我的背包', icon: 'i-carbon-box' },
+   { key: 'task', label: '我的任务', icon: 'i-carbon-task' },
+ ]
+@@ -38,36 +21,6 @@ watch(currentTab, (tab) => {
+   if (!visitedTabs.value.includes(tab))
+     visitedTabs.value.push(tab)
+ })
+-
+-async function handleUseInteraction(itemId: string, landIds: string[]) {
+-  if (!currentAccountId.value || !itemId || landIds.length === 0)
+-    return
+-  const result: any = await farmStore.useSelfInteractionItemBatch(currentAccountId.value, itemId, landIds)
+-  if (result?.ok) {
+-    if (Number(result.failureCount || 0) > 0) {
+-      toast.warning(result.message || `成功 ${result.successCount} 块，失败 ${result.failureCount} 块`)
+-    }
+-    else {
+-      toast.success(result.message || `已使用 ${result.successCount} 个道具`)
+-    }
+-  }
+-  else {
+-    toast.error(result?.message || '使用互动道具失败')
+-  }
+-}
+-
+-function loadInteractionItems() {
+-  if (currentAccountId.value) {
+-    farmStore.fetchSelfInteractionItems(currentAccountId.value)
+-  }
+-}
+-
+-watch(currentTab, (tab) => {
+-  if (tab === 'interaction')
+-    loadInteractionItems()
+-}, { immediate: true })
+-
+-const interactionLoading = computed(() => selfInteractionItemsLoading.value || selfInteractionUsePending.value)
+ </script>
+ 
+ <template>
+@@ -85,26 +38,14 @@ const interactionLoading = computed(() => selfInteractionItemsLoading.value || s
+       >
+         <div class="flex items-center gap-2">
+           <div :class="tab.icon" class="text-lg" />
+-          <span>{{ tab.label }}</span>
+-        </div>
++        <span>{{ tab.label }}</span>
++      </div>
+       </button>
+     </div>
+ 
+     <div class="flex-1 overflow-hidden overflow-y-auto">
+       <div v-for="tab in visitedTabs" v-show="tab === currentTab" :key="tab">
+         <FarmPanel v-if="tab === 'farm'" />
+-
+-        <div v-else-if="tab === 'interaction'" class="p-1">
+-          <FriendsInteractionPanel
+-            gid="self"
+-            :lands="lands"
+-            :items="selfInteractionItems"
+-            :loading="interactionLoading"
+-            :pending="selfInteractionUsePending"
+-            @use="handleUseInteraction"
+-          />
+-        </div>
+-
+         <BagPanel v-else-if="tab === 'bag'" />
+         <TaskPanel v-else-if="tab === 'task'" />
+       </div>
+-- 
+2.55.0.windows.3
+

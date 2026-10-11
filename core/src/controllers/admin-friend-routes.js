@@ -87,6 +87,23 @@ function registerAdminFriendRoutes({
     }
   });
 
+  // 仅读取 Worker 内存中的好友列表缓存，不触发任何游戏协议请求。
+  // 供好友页秒开使用：先拿缓存渲染，再由 /api/friends 拉取最新数据覆盖。
+  app.get("/api/friends/cache", async (req, res) => {
+    const accountId = getAccountOrRespond(req, res, {
+      ...access,
+      includeMissingMessage: false,
+    });
+    if (!accountId) return;
+
+    try {
+      const data = await provider.getFriendsCache(accountId);
+      res.json({ ok: true, data: Array.isArray(data) ? data : [] });
+    } catch (error) {
+      sendProviderError(res, error);
+    }
+  });
+
   app.post("/api/friends/clear-cache", async (req, res) => {
     const accountId = getAccountOrRespond(req, res, access);
     if (!accountId) return;

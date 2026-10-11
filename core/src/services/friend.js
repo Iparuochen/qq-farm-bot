@@ -6,6 +6,7 @@ const {
   getFriendDogInfo,
   batchGetFriendDogInfo,
   fetchFriendsDogInfo,
+  getFriendsListCache,
 } = require('./friend-land-analyzer');
 const { doFriendOperation } = require('./friend-visit');
 const { runGoldenBugPlacement } = require('./golden-bug-service');
@@ -32,6 +33,7 @@ module.exports = {
   isHelpExpLimitReached,
   getOperationLimits,
   getFriendsList,
+  getFriendsListCache,
   getFriendLandsDetail,
   doFriendOperation,
   clearFriendsListCache,

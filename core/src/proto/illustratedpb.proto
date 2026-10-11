@@ -7,7 +7,9 @@ import "corepb.proto";
 
 service IllustratedService {
   rpc GetIllustratedListV2(GetIllustratedListV2Request) returns (GetIllustratedListV2Reply);
+  rpc GetIllustratedLevelListV2(GetIllustratedLevelListV2Request) returns (GetIllustratedLevelListV2Reply);
   rpc ClaimAllRewardsV2(ClaimAllRewardsV2Request) returns (ClaimAllRewardsV2Reply);
+  rpc ClearNewUnlockedFruitsV2(ClearNewUnlockedFruitsV2Request) returns (ClearNewUnlockedFruitsV2Reply);
 }
 
 message GetIllustratedListV2Request {
@@ -47,6 +49,30 @@ message GetIllustratedListV2Reply {
     repeated corepb.Item next_level_rewards = 11;
 }
 
+// 图鉴等级奖励列表（作物图鉴「详情」弹窗的等级进度与奖励）
+message GetIllustratedLevelListV2Request {
+    int32 type = 1;
+}
+
+message IllustratedLevel {
+    int32 level = 1;
+    int64 progress = 2;
+    repeated IllustratedReward rewards = 3;
+    bool claimed = 5;
+}
+
+message GetIllustratedLevelListV2Reply {
+    int32 level = 1;
+    int64 progress = 2;
+    repeated IllustratedLevel levels = 3;
+}
+
+// 图鉴奖励条目（item_id + count）
+message IllustratedReward {
+    int64 item_id = 1;
+    int64 count = 2;
+}
+
 message ClaimAllRewardsV2Request {
     bool only_claimable = 1;
 }
@@ -57,3 +83,12 @@ message ClaimAllRewardsV2Reply {
 }
 
 message IllustratedRewardRedDotNotifyV2 {}
+
+// ============ 清除新解锁水果标记 V2 ============
+message ClearNewUnlockedFruitsV2Request {
+    bytes seed_id = 1;
+}
+
+message ClearNewUnlockedFruitsV2Reply {
+    bytes seed_id = 1;
+}

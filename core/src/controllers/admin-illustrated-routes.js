@@ -9,6 +9,10 @@ const {
   registerAdminIllustratedPurchaseRoutes,
 } = require("./admin-illustrated-purchase-routes");
 const { getNongmePlantData } = require("../services/nongme-plant-data");
+const {
+  getIllustratedBuffs,
+  getIllustratedBuffsByLevel,
+} = require("../config/gameConfig");
 
 function getAuthorizedAccountId(req, res, { getAccountIdFromRequest, canAccessAccount }) {
   const accountId = getAccountIdFromRequest(req);
@@ -67,7 +71,9 @@ function registerAdminIllustratedRoutes({
         illustratedType,
       });
 
-      const [seedGoodsMap, illustratedList, nongmeData] = await Promise.all([
+      // 面板按「作物图鉴 / 变异图鉴」两个分组读取，这里一次性取回两组数据。
+      // 等级奖励列表为可选增强项，请求失败时不影响主流程。
+      const [seedGoodsMap, cropReply, mutantReply, nongmeData] = await Promise.all([
         getSeedShopGoodsMap({
           provider,
           accountId,
@@ -75,43 +81,89 @@ function registerAdminIllustratedRoutes({
           tolerateFailure: true,
         }),
         provider.getIllustratedList(accountId, refresh, illustratedType),
+        provider.getIllustratedList(accountId, refresh, illustratedType === 2 ? 1 : 2)
+          .catch(() => null),
         getNongmePlantData(refresh),
       ]);
 
+      const [cropLevels, mutantLevels] = await Promise.all([
+        provider.getIllustratedLevels(accountId, 1).catch(() => null),
+        provider.getIllustratedLevels(accountId, 2).catch(() => null),
+      ]);
+
       adminLogger.info("图鉴列表数据", {
-        itemsCount: illustratedList?.items?.length || 0,
-        hasRaw: !!illustratedList?.__raw,
-        rawCount: illustratedList?.__raw?.rawItemCount || 0,
+        itemsCount: cropReply?.items?.length || 0,
+        hasRaw: !!cropReply?.__raw,
+        rawCount: cropReply?.__raw?.rawItemCount || 0,
       });
 
-      const items = sortIllustratedItems(
-        (illustratedList?.items || []).map(item =>
-          buildIllustratedItem(item, {
-            seedGoodsMap,
-            userLevel,
-            adminLogger,
-            nongmeFruitMap: nongmeData.byFruitId,
-          }),
-        ),
-      );
-      const summary = summarizeIllustratedItems(items);
+      const buildBook = (reply, type, levelsReply) => {
+        const list = sortIllustratedItems(
+          (reply?.items || []).map(item =>
+            buildIllustratedItem(item, {
+              seedGoodsMap,
+              userLevel,
+              adminLogger,
+              nongmeFruitMap: nongmeData.byFruitId,
+            }),
+          ),
+        )
+        const level = Number(reply?.level) || 0
+        return {
+          items: list,
+          summary: summarizeIllustratedItems(list),
+          userLevel,
+          type,
+          level,
+          // 面板进度条读的是 progress / nextLevelProgress（本仓库字段名为 current_score / next_score）
+          progress: Number(reply?.current_score) || 0,
+          nextLevelProgress: Number(reply?.next_score) || 0,
+          currentScore: Number(reply?.current_score) || 0,
+          nextScore: Number(reply?.next_score) || 0,
+          // 超变图鉴(type=2)展示等级加成；作物图鉴不展示
+          buffs: type === 2 ? getIllustratedBuffs() : [],
+          currentBuffs: type === 2 ? getIllustratedBuffsByLevel(level) : [],
+          // 图鉴等级奖励列表（详情弹窗用），未取到时传空数组，面板有兜底。
+          levels: Array.isArray(levelsReply?.levels) ? levelsReply.levels : [],
+          // 面板对这些字段做了 Array.isArray 兜底，本仓库暂未提供时传空即可。
+          currentBonus: null,
+          attributeBonuses: [],
+        }
+      }
+
+      // cropReply 为请求类型对应的返回，mutantReply 为另一种类型的返回；
+      // 无论请求哪种类型，作物图鉴恒为 type=1、超变图鉴恒为 type=2。
+      const crop = buildBook(illustratedType === 2 ? mutantReply : cropReply, 1, cropLevels)
+      const mutant = buildBook(illustratedType === 2 ? cropReply : mutantReply, 2, mutantLevels)
+      const items = crop.items
+      const summary = crop.summary
 
       adminLogger.info("图鉴列表返回", {
         total: summary.total,
         unlocked: summary.unlocked,
         canBuy: summary.canBuy,
         userLevel,
+        cropItems: crop.items.length,
+        mutantItems: mutant.items.length,
+        mutantGroups: ["gold", "decoration", "activity"].map(group => ({
+          group,
+          count: mutant.items.filter(item => item.group === group).length,
+        })),
       });
 
       res.json({
         ok: true,
         data: {
+          // 面板按分组读取（crop / mutant）
+          crop,
+          mutant,
+          // 同时保留原有扁平字段，便于其它调用方继续读取
           items,
           summary,
           userLevel,
-          level: Number(illustratedList?.level) || 0,
-          currentScore: Number(illustratedList?.current_score) || 0,
-          nextScore: Number(illustratedList?.next_score) || 0,
+          level: crop.level,
+          currentScore: crop.currentScore,
+          nextScore: crop.nextScore,
         },
       });
     } catch (err) {

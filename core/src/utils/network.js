@@ -608,6 +608,13 @@ function handleMessage(data) {
                 pendingCallbacks.delete(clientSeqVal);
                 pendingStartedAt.delete(clientSeqVal);
                 const fn = typeof entry === 'function' ? entry : (entry && entry.callback);
+                // 除 AllLands 之外的 PlantService 调用、以及 ItemService.Use，
+                // 都会改变地块或背包状态，据此作废升级预测的土地快照。
+                if (errorCode === 0
+                    && ((meta.service_name === 'gamepb.plantpb.PlantService' && meta.method_name !== 'AllLands')
+                        || (meta.service_name === 'gamepb.itempb.ItemService' && meta.method_name === 'Use'))) {
+                    require('../services/level-forecast').invalidateLandForecast();
+                }
                 if (typeof fn === 'function') {
                     if (errorCode !== 0) {
                         fn(new Error(`${meta.service_name}.${meta.method_name} 错误: code=${errorCode} ${meta.error_message || ''}`));
@@ -661,6 +668,8 @@ function handleNotify(msg) {
                 const lands = notify.lands || [];
                 if (lands.length > 0) {
                     if (hostGid === userState.gid || hostGid === 0) {
+                        // 地块已变化，作废升级预测用的土地快照
+                        require('../services/level-forecast').invalidateLandForecast();
                         networkEvents.emit('landsChanged', lands);
                     } else {
                         networkEvents.emit('friendLandsObserved', {
@@ -799,6 +808,19 @@ function handleNotify(msg) {
                     const names = friends.map(f => f.name || f.remark || `GID:${toNum(f.gid)}`).join(', ');
                     log('好友', `新好友: ${names}`);
                 }
+            } catch { }
+            return;
+        }
+
+        // 特殊天气变化。通知携带天气所属农场 GID；空 weather 表示天气结束。
+        // 雨落成诗（weather-activity）依赖该事件清理好友现场天气缓存。
+        if (type.includes('WeatherChangeNotify')) {
+            try {
+                const notify = types.WeatherChangeNotify.decode(eventBody);
+                networkEvents.emit('weatherChanged', {
+                    hostGid: toNum(notify.host_gid),
+                    weather: notify.weather || null,
+                });
             } catch { }
             return;
         }
@@ -1222,6 +1244,8 @@ function cleanup(reason = '网络清理') {
     rejectAllPendingRequests(`请求已中断: ${reason}`);
     rejectAllQueuedRequests(`请求已中断: ${reason}`);
     networkScheduler.clearAll();
+    // 断线后旧快照对应的账号已不适用，清掉升级预测缓存
+    require('../services/level-forecast').invalidateLandForecast();
 }
 
 function reconnect(newCode) {

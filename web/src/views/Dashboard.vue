@@ -7,6 +7,7 @@ import api from '@/api'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
 import BaseSelect from '@/components/ui/BaseSelect.vue'
+import LevelForecast from '@/components/LevelForecast.vue'
 import { useAccountStore } from '@/stores/account'
 import { useBagStore } from '@/stores/bag'
 import { useStatusStore } from '@/stores/status'
@@ -147,25 +148,34 @@ const displayName = computed(() => {
   return '未命名'
 })
 
+// 本次会话（账号登录至今）的时长。
+// 不用 uptime：那是整个 Node 进程的运行时长，包含所有账号与断线时间，
+// 用来算经验效率会被严重稀释。uptime 仅作为兜底。
+const sessionSeconds = computed(() => {
+  const s = Number(status.value?.sessionElapsedSeconds) || 0
+  if (s > 0) return s
+  return Number(status.value?.uptime) || 0
+})
+
 const expRate = computed(() => {
   const gain = status.value?.sessionExpGained || 0
-  const uptime = status.value?.uptime || 0
-  if (!uptime)
+  const seconds = sessionSeconds.value
+  if (!seconds || gain <= 0)
     return '0/小时'
-  const rate = gain / (uptime / 3600)
+  const rate = gain / (seconds / 3600)
   return `${Math.floor(rate)}/小时`
 })
 
 const timeToLevel = computed(() => {
   const gain = status.value?.sessionExpGained || 0
-  const uptime = status.value?.uptime || 0
+  const seconds = sessionSeconds.value
   const current = status.value?.levelProgress?.current || 0
   const needed = status.value?.levelProgress?.needed || 0
 
-  if (!needed || !uptime || gain <= 0)
+  if (!needed || !seconds || gain <= 0)
     return ''
 
-  const ratePerHour = gain / (uptime / 3600)
+  const ratePerHour = gain / (seconds / 3600)
   if (ratePerHour <= 0)
     return ''
 
@@ -634,6 +644,7 @@ useIntervalFn(updateCountdowns, 1000)
             <span>效率: {{ expRate }}</span>
             <span>{{ timeToLevel }}</span>
           </div>
+          <LevelForecast v-if="status?.connection?.connected" :forecast="status?.levelForecast" />
         </div>
       </div>
 

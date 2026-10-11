@@ -14,12 +14,18 @@ message CheckCanShareReply {
 }
 
 // --- 报告分享 ---
+// 注意：真实协议不是 bool。字段 1 是 int32 的「分享来源」，字段 4 是「场景」，
+// 每日分享固定传 1 / 42（对照上游 services/share.ts 的 reportShare）。
+// 早期版本这里误写成 bool shared = 1，会导致服务端不认、回复里也不存在 success 语义。
 message ReportShareRequest {
-    bool shared = 1;  // 是否已分享
+    int32 field_1 = 1;  // 分享来源（每日分享 = 1）
+    int32 field_4 = 4;  // 场景（每日分享 = 42）
 }
 
+// 回复的字段 1 是 bytes result，不是 bool success；
+// 上游只 decode 不判断返回值——请求发出且不抛异常即视为上报成功。
 message ReportShareReply {
-    bool success = 1;  // 是否成功
+    bytes result = 1;
 }
 
 // --- 领取分享奖励 ---

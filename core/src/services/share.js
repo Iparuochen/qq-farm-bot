@@ -82,12 +82,23 @@ async function checkCanShare() {
   return types.CheckCanShareReply.decode(body);
 }
 
+// 每日分享固定使用 来源=1 / 场景=42（对照上游 services/share.ts reportShare）
+const DAILY_SHARE_SOURCE = 1;
+const DAILY_SHARE_SCENE = 42;
+
 async function reportShare() {
   const request = types.ReportShareRequest.encode(
-    types.ReportShareRequest.create({ shared: true })
+    types.ReportShareRequest.create({
+      field_1: DAILY_SHARE_SOURCE,
+      field_4: DAILY_SHARE_SCENE,
+    })
   ).finish();
   const { body } = await sendMsgAsync('gamepb.sharepb.ShareService', 'ReportShare', request);
-  return types.ReportShareReply.decode(body);
+  // 回复的字段 1 是 bytes result，没有 success 语义。
+  // 只要请求没有抛异常就认为上报成功——这是上游的做法，
+  // 早期版本误判 result.success 导致每天都刷「上报分享状态失败」。
+  types.ReportShareReply.decode(body);
+  return true;
 }
 
 async function claimShareReward() {
@@ -120,12 +131,8 @@ async function performDailyShare(force = false) {
       return false;
     }
 
-    // 上报分享
-    const reportResult = await reportShare();
-    if (!reportResult || !reportResult.success) {
-      log('分享', '上报分享状态失败', { module: 'task', event: DAILY_KEY, result: 'error' });
-      return false;
-    }
+    // 上报分享（请求不抛异常即成功，reply 无 success 字段可判断）
+    await reportShare();
 
     // 领取奖励
     let claimResult = null;

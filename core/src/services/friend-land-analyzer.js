@@ -588,9 +588,15 @@ async function getFriendLandsDetail(gid) {
       });
     }
 
-    return { lands: detailLands, summary: analysis };
+    // 好友详情弹窗在土地卡片上方展示「生涯收获 / 生涯偷菜 / 收偷比」，
+    // 数据来自 careerpb.CareerService 的 CareerInfoGet。
+    // 用 getCareerInfoOrNull：生涯查询失败不应导致整块土地数据不可用。
+    const { getCareerInfoOrNull } = require('./career');
+    const career = await getCareerInfoOrNull(gid);
+
+    return { lands: detailLands, summary: analysis, career };
   } catch {
-    return { lands: [], summary: {} };
+    return { lands: [], summary: {}, career: null };
   }
 }
 

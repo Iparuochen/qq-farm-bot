@@ -30,9 +30,14 @@ async function sendPlantRequest(ReqType, ReplyType, method, landIds, hostGid) {
 
 /** 获取所有地块数据 */
 async function getAllLands() {
+  // 记住这次拉到的地块，供「按已种植作物预测升级时间」使用。
+  // 先取 revision 再请求，请求返回时若期间收到过地块失效通知则丢弃这份快照。
+  const forecast = require('./level-forecast');
+  const revision = forecast.getLandForecastRevision();
   const payload = types.AllLandsRequest.encode(types.AllLandsRequest.create({})).finish();
   const { body } = await sendMsgAsync('gamepb.plantpb.PlantService', 'AllLands', payload);
   const reply = types.AllLandsReply.decode(body);
+  forecast.rememberLandForecast(reply.lands, getUserState(), revision);
   if (reply.operation_limits && onOperationLimitsUpdate) {
     onOperationLimitsUpdate(reply.operation_limits);
   }
