@@ -261,6 +261,9 @@ let friendsListCache = null;
 let friendsListRefreshAt = 0;
 let friendsListPending = null;
 const FRIEND_LIST_REFRESH_MS = 5 * 60 * 1000;
+// 空结果 / 抓取失败时只冷却很短一段时间：既挡住高频重试，
+// 又不会让面板被锁死 5 分钟卡在“暂无好友”。
+const FRIEND_LIST_EMPTY_REFRESH_MS = 30 * 1000;
 
 /**
  * Get a processed friends list with dog info from cache if available.
@@ -272,13 +275,15 @@ async function getFriendsList(forceRefresh = false) {
   friendsListPending = fetchFriendsList();
   try {
     const list = await friendsListPending;
-    // 只有真正取到好友才开启缓存窗口；抓取失败返回的空数组不能锁住 5 分钟，
-    // 否则面板会出现“暂无好友”且长时间不自动恢复。
     if (Array.isArray(list) && list.length > 0) {
       friendsListCache = list;
       friendsListRefreshAt = Date.now() + FRIEND_LIST_REFRESH_MS;
+      return list;
     }
-    return Array.isArray(list) ? list : [];
+    // 拿不到好友时保留上一次的列表继续展示（避免面板闪成空白），
+    // 但只开 30 秒的短冷却，接口一恢复就能立刻自愈。
+    friendsListRefreshAt = Date.now() + FRIEND_LIST_EMPTY_REFRESH_MS;
+    return friendsListCache && friendsListCache.length > 0 ? friendsListCache : [];
   } finally {
     friendsListPending = null;
   }

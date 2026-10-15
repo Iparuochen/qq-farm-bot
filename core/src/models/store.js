@@ -77,15 +77,25 @@ function getLocalDateKey(timestamp = Date.now()) {
     return `${year}-${month}-${day}`;
 }
 
+// 缓存是否还属于「今天」。缺失、损坏或跨天都视为无效。
+function isFriendDogInfoCacheFresh(data, now = Date.now()) {
+    if (!data || typeof data !== 'object') return false;
+    const cacheDate = String(data.cacheDate || getLocalDateKey(data.updatedAt));
+    return !!cacheDate && cacheDate === getLocalDateKey(now);
+}
+
+// 取出「今天」的护主犬缓存，过期 / 缺失 / 结构不对都返回 null。
+function normalizeFriendDogInfoCache(data, now = Date.now()) {
+    if (!data || typeof data.dogInfo !== 'object' || data.dogInfo === null) return null;
+    return isFriendDogInfoCacheFresh(data, now) ? data.dogInfo : null;
+}
+
 function readFriendDogInfoCacheRaw(accountId, now = Date.now()) {
     try {
         const filePath = getFriendDogInfoCacheFile(accountId);
         if (!fs.existsSync(filePath)) return null;
         const data = readJsonFile(filePath);
-        if (!data || typeof data !== 'object') return null;
-        const cacheDate = String(data.cacheDate || getLocalDateKey(data.updatedAt));
-        if (!cacheDate || cacheDate !== getLocalDateKey(now)) return null;
-        return data;
+        return isFriendDogInfoCacheFresh(data, now) ? data : null;
     } catch { }
     return null;
 }
@@ -2247,6 +2257,7 @@ module.exports = {
 
 module.exports._test = {
     ...(module.exports._test || {}),
+    normalizeFriendDogInfoCache,
     normalizeCapitalMode,
     disableHiddenActivityAutomation,
     HIDDEN_ACTIVITY_AUTOMATION_KEYS,

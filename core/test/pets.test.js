@@ -48,7 +48,9 @@ test('bichon metadata and official image resolve for owned and unowned pets', ()
   const owned = buildPetSnapshot({ current_dog_id: 90031, dogs: [{ id: 90031, owned: 1, level: 3 }] }).dogs;
   assert.equal(owned.filter(dog => dog.id === 90031).length, 1);
   assert.deepEqual({ ...owned.find(dog => dog.id === 90031) }, {
-    ...unowned, owned: true, activatable: false, deployed: true, level: 3
+    // active 与 deployed 同时返回（前端 PetInfo 读 active，早期页面读 deployed），
+    // 上场时两者都为 true。
+    ...unowned, owned: true, activatable: false, deployed: true, active: true, level: 3
   });
   assert.equal(unowned.image, image);
   assert.match(unowned.desc, /比熊润田/);
