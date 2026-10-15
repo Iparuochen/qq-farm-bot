@@ -431,9 +431,14 @@ async function loadData() {
   if (!accountId || !currentAccountRunning.value || activeTab.value !== 'friends' || friendsLoadedAccount.value === accountId)
     return
 
-  friendsLoadedAccount.value = accountId
   avatarErrorKeys.value.clear()
-  await friendStore.fetchFriends(accountId)
+  const ok = await friendStore.fetchFriends(accountId)
+  if (ok) {
+    friendsLoadedAccount.value = accountId
+    return
+  }
+  // 拉取失败时不标记为已加载，这样切回本页会自动重试，而不是一直显示“暂无好友”
+  toast.error(friendStore.friendsError || '获取好友列表失败，请稍后重试')
 }
 
 function loadTabData() {
@@ -515,7 +520,42 @@ async function handleRefreshFriends() {
   catch {
     // ignore
   }
-  await friendStore.fetchFriends(currentAccountId.value, true)
+  const ok = await friendStore.fetchFriends(currentAccountId.value, true)
+  if (ok)
+    friendsLoadedAccount.value = currentAccountId.value
+  else
+    toast.error(friendStore.friendsError || '刷新好友列表失败')
+}
+
+const petSyncRunning = ref(false)
+
+// 主动同步全部好友的看家宠物：逐个进农场确认，好友多时会比较慢
+async function handleSyncFriendPets() {
+  const accountId = currentAccountId.value
+  if (!accountId || petSyncRunning.value)
+    return
+  petSyncRunning.value = true
+  toast.info('开始同步好友宠物，好友较多时可能需要几分钟', 6000)
+  try {
+    const res = await api.post('/api/friends/fetch-dog-info', {}, {
+      headers: { 'x-account-id': accountId },
+      timeout: 11 * 60 * 1000,
+    })
+    const data = res.data || {}
+    if (data.ok === false || data.complete === false) {
+      toast.warning(`宠物同步未全部完成，已确认护主犬 ${data.guardDogCount ?? 0} 个，稍后可再同步`, 6000)
+    }
+    else {
+      toast.success(`宠物同步完成：护主犬 ${data.guardDogCount ?? 0} 个，无狗 ${data.failCount ?? 0} 个`)
+    }
+  }
+  catch (e) {
+    toast.error(getApiErrorMessage(e, '同步好友宠物失败'))
+  }
+  finally {
+    petSyncRunning.value = false
+    await friendStore.fetchFriends(accountId, true)
+  }
 }
 
 async function refreshFriendLands(friendId: unknown) {
@@ -989,6 +1029,14 @@ async function handleBatchAddKnownFriendGids() {
         <template v-else>
           <div class="flex flex-wrap items-center gap-2 farm-card rounded-2xl bg-white p-3 shadow-md dark:bg-gray-800">
             <div class="flex-1" />
+            <BaseButton
+              variant="secondary"
+              size="sm"
+              :loading="petSyncRunning"
+              @click="handleSyncFriendPets"
+            >
+              同步宠物
+            </BaseButton>
             <BaseButton
               variant="secondary"
               size="sm"

@@ -388,7 +388,9 @@ function saveCards() {
 
 function initDefaultAdmin() {
     loadUsers();
-    const adminExists = users.find(u => u.username === 'admin');
+    // 按角色判断是否已有管理员，而非按用户名 —— 否则管理员改名后会被误判为
+    // 「不存在」而重新创建出默认 admin 账号。
+    const adminExists = users.find(u => u.role === 'admin' || u.role === 'super_admin');
     if (!adminExists) {
         const defaultPassword = 'admin';
         users.push({

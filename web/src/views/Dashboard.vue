@@ -82,43 +82,94 @@ const modules = [
   { label: '系统', value: 'system' },
 ]
 
-const events = [
+type EventOption = { label: string, value: string, module?: string }
+
+const events: EventOption[] = [
   { label: '全部事件', value: '' },
-  { label: '农场巡查', value: '农场循环' },
-  { label: '收获作物', value: '收获作物' },
-  { label: '清理枯枝', value: '铲除植物' },
-  { label: '种植种子', value: '种植种子' },
-  { label: '施加化肥', value: '施肥' },
-  { label: '土地提醒', value: '土地推送通知' },
-  { label: '选择种子', value: '选择种子' },
-  { label: '购买种子', value: '购买种子' },
-  { label: '购买化肥', value: '购买化肥' },
-  { label: '开启礼盒', value: '开启化肥礼包' },
-  { label: '获取任务', value: '扫描任务' },
-  { label: '完成任务', value: '领取任务' },
-  { label: '免费礼包', value: 'mall_free_gifts' },
-  { label: '分享奖励', value: 'daily_share' },
-  { label: '会员礼包', value: 'vip_daily_gift' },
-  { label: '月卡礼包', value: 'month_card_gift' },
-  { label: '图鉴奖励', value: '图鉴奖励' },
-  { label: '邮箱领取', value: 'email_rewards' },
-  { label: '出售成功', value: 'sell_success' },
-  { label: '神秘商人', value: '神秘商人自动购买' },
-  { label: '土地升级', value: '升级土地' },
-  { label: '土地解锁', value: '解锁土地' },
-  { label: '好友巡查', value: '好友巡查循环' },
-  { label: '访问好友', value: '进入农场' },
-  { label: '激活宠物', value: '激活宠物' },
-  { label: '派出宠物', value: '派出宠物' },
-  { label: '召回宠物', value: '召回宠物' },
-  { label: '喂食宠物', value: '喂食宠物' },
-  { label: '资本模式派出', value: '资本模式派出' },
-  { label: '资本模式召回', value: '资本模式召回' },
+  // —— 农场 ——
+  { label: '农场巡查', value: '农场循环', module: 'farm' },
+  { label: '收获作物', value: '收获作物', module: 'farm' },
+  { label: '清理枯枝', value: '铲除植物', module: 'farm' },
+  { label: '种植种子', value: '种植种子', module: 'farm' },
+  { label: '施加化肥', value: '施肥', module: 'farm' },
+  { label: '多季节施肥', value: '多季节施肥', module: 'farm' },
+  { label: '土地提醒', value: '土地推送通知', module: 'farm' },
+  { label: '土地升级', value: '升级土地', module: 'farm' },
+  { label: '土地解锁', value: '解锁土地', module: 'farm' },
+  { label: '催熟', value: '催熟', module: 'farm' },
+  { label: '一键铲除', value: '一键铲除', module: 'farm' },
+  { label: '2x2买种', value: '2x2同步买种', module: 'farm' },
+  { label: '2x2填格', value: '2x2同步填格', module: 'farm' },
+  { label: '种植2x2作物', value: '种植2x2作物', module: 'farm' },
+  { label: '预留2x2土地', value: '预留2x2土地', module: 'farm' },
+  // —— 好友 ——
+  { label: '好友巡查', value: '好友巡查循环', module: 'friend' },
+  { label: '访问好友', value: '进入农场', module: 'friend' },
+  { label: '偷好友菜', value: '偷好友菜', module: 'friend' },
+  { label: '偷菜巡查', value: '偷菜巡查', module: 'friend' },
+  { label: '偷菜后出售', value: '偷菜后出售', module: 'friend' },
+  { label: '帮助好友', value: '帮助好友', module: 'friend' },
+  { label: '帮助巡查', value: '帮助巡查', module: 'friend' },
+  { label: '照顾好友', value: '照顾好友', module: 'friend' },
+  { label: '护主犬好友巡查', value: '护主犬好友巡查', module: 'friend' },
+  { label: '护主犬帮助成功', value: '护主犬好友帮助成功', module: 'friend' },
+  { label: '好友扫描', value: '好友扫描', module: 'friend' },
+  { label: '刷新好友列表', value: '刷新好友列表', module: 'friend' },
+  { label: '自动放虫放草', value: '开始自动放虫放草', module: 'friend' },
+  { label: '放虫放草处理好友', value: '放虫放草处理好友', module: 'friend' },
+  { label: '放虫放草失败', value: '放虫放草失败', module: 'friend' },
+  { label: '放虫放草次数用完', value: '放虫放草次数用完', module: 'friend' },
+  // —— 仓库 ——
+  { label: '选择种子', value: '选择种子', module: 'warehouse' },
+  { label: '购买种子', value: '购买种子', module: 'warehouse' },
+  { label: '购买化肥', value: '购买化肥', module: 'warehouse' },
+  { label: '开启礼盒', value: '开启化肥礼包', module: 'warehouse' },
+  { label: '出售成功', value: 'sell_success', module: 'warehouse' },
+  // —— 商城 ——
+  { label: '神秘商人', value: '神秘商人自动购买', module: 'shop' },
+  // —— 任务 ——
+  { label: '获取任务', value: '扫描任务', module: 'task' },
+  { label: '完成任务', value: '领取任务', module: 'task' },
+  { label: '图鉴奖励', value: '图鉴奖励', module: 'task' },
+  { label: '免费礼包', value: 'mall_free_gifts', module: 'task' },
+  { label: '分享奖励', value: 'daily_share', module: 'task' },
+  { label: '会员礼包', value: 'vip_daily_gift', module: 'task' },
+  { label: '月卡礼包', value: 'month_card_gift', module: 'task' },
+  { label: '邮箱领取', value: 'email_rewards', module: 'task' },
+  // —— 宠物 ——
+  { label: '激活宠物', value: '激活宠物', module: 'pet' },
+  { label: '派出宠物', value: '派出宠物', module: 'pet' },
+  { label: '召回宠物', value: '召回宠物', module: 'pet' },
+  { label: '喂食宠物', value: '喂食宠物', module: 'pet' },
+  { label: '资本模式派出', value: '资本模式派出', module: 'pet' },
+  { label: '资本模式召回', value: '资本模式召回', module: 'pet' },
 ]
 
 const eventLabelMap: Record<string, string> = Object.fromEntries(
   events.filter(event => event.value).map(event => [event.value, event.label]),
 )
+
+// 事件选项跟随前面的「模块」下拉联动：
+// 选中某个模块后只列出该模块的事件，避免一长串混杂清单。
+const eventOptions = computed<EventOption[]>(() => {
+  const known = new Set(events.map(item => item.value))
+  const extras: EventOption[] = []
+  for (const log of allLogs.value) {
+    if (log.source !== 'business')
+      continue
+    const value = String(log.event || '').trim()
+    if (!value || known.has(value))
+      continue
+    known.add(value)
+    extras.push({ label: value, value, module: String(log.module || '') })
+  }
+
+  const pool = extras.length ? [...events, ...extras] : events
+  if (!filter.module)
+    return pool
+
+  return pool.filter(item => !item.value || (item.module || '') === filter.module)
+})
 
 const displayName = computed(() => {
   const account = accountStore.currentAccount
@@ -509,6 +560,13 @@ function onLogFilterChange() {
   restoreLogScroll()
 }
 
+// 切换模块后，若当前选中的事件已不属于该模块，则清空事件筛选
+function onLogModuleChange() {
+  if (filter.event && !eventOptions.value.some(item => item.value === filter.event))
+    filter.event = ''
+  onLogFilterChange()
+}
+
 function onLogSearchTrigger() {
   pendingLogCount.value = 0
   restoreLogScroll()
@@ -786,12 +844,12 @@ useIntervalFn(updateCountdowns, 1000)
                 v-model="filter.module"
                 :options="modules"
                 class="w-36"
-                @change="onLogFilterChange"
+                @change="onLogModuleChange"
               />
 
               <BaseSelect
                 v-model="filter.event"
-                :options="events"
+                :options="eventOptions"
                 class="w-36"
                 @change="onLogFilterChange"
               />

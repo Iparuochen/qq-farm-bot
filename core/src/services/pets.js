@@ -18,9 +18,31 @@ function serialize(operation) {
 }
 
 function num(value) { return Math.max(0, toNum(value)); }
+
+// 稀有度 → 中文标签。前端 PetInfo.rarityLabel 依赖该字段渲染卡片右上角角标。
+const RARITY_LABELS = { 1: '普通', 2: '优良', 3: '稀有', 4: '史诗', 5: '传说' };
+
+function rarityLabel(rarity) {
+  return RARITY_LABELS[num(rarity)] || '普通';
+}
+
 function metadata(id) {
   const item = getItemById(id) || {};
-  return { id, name: String(item.name || `宠物#${id}`), desc: String(item.desc || ''), rarity: num(item.rarity), image: getItemImageById(id) };
+  const rarity = num(item.rarity);
+  const desc = String(item.desc || '');
+  return {
+    id,
+    name: String(item.name || `宠物#${id}`),
+    desc,
+    rarity,
+    rarityLabel: rarityLabel(rarity),
+    image: getItemImageById(id),
+    // 前端卡片在「技能」「获得条件」两行展示这两个字段。
+    // 技能描述目前只能从 desc 提取（desc 形如「……有10%的概率触发看护技能。」）。
+    skillDescription: desc,
+    obtainCondition: '',
+    status: 0
+  };
 }
 
 function getDogActivationState(reply, dogIdInput) {
@@ -79,10 +101,40 @@ function buildPetSnapshot(reply, bagReply = {}) {
       skillId: num(item.skill_id), usedCount: num(item.used_count), dailyLimit: num(item.daily_limit)
     }));
     const owned = num(raw.owned) === 1 || id === currentDogId;
+    const deployed = id === currentDogId;
+    const base = metadata(id);
+    // 前端以 skills 数组渲染「技能」区，逐项展示名称/描述/触发率。
+    const skills = skillUsage.length > 0
+      ? skillUsage.map(usage => ({
+          skillId: usage.skillId,
+          name: `技能 #${usage.skillId}`,
+          description: base.skillDescription,
+          usedCount: usage.usedCount,
+          dailyLimit: usage.dailyLimit,
+          remainingCount: Math.max(0, usage.dailyLimit - usage.usedCount),
+          source: 'game-config'
+        }))
+      : (base.skillDescription
+          ? [{ skillId: 0, name: '看护技能', description: base.skillDescription, source: 'client-static' }]
+          : []);
+    // 「获得条件」按持有状态给出可执行提示。
+    const obtainCondition = owned
+      ? ''
+      : (activatableCardIds.has(id) ? '狗盆中已有该宠物卡，激活即可拥有' : '前往商城购买后即可拥有');
     return {
-      ...metadata(id), price: num(raw.price), level: num(raw.level), owned,
+      ...base,
+      price: num(raw.price),
+      level: num(raw.level),
+      owned,
       activatable: !owned && (num(raw.field_6) === 1 || activatableCardIds.has(id)),
-      deployed: id === currentDogId, skillUsage
+      // 前端 PetInfo 用的是 active，历史上另有 deployed 一处；两处都返回，避免任一侧取不到。
+      active: deployed,
+      deployed,
+      skills,
+      skillDescription: base.skillDescription,
+      obtainCondition,
+      status: owned ? (deployed ? 2 : 1) : (num(raw.field_6) === 1 || activatableCardIds.has(id) ? 3 : 0),
+      skillUsage
     };
   });
   const foodCounts = new Map();
@@ -92,7 +144,28 @@ function buildPetSnapshot(reply, bagReply = {}) {
   }
   const foods = [...FOOD_DURATIONS].map(([id, duration]) => ({ ...metadata(id), duration, days: duration / 86400, count: foodCounts.get(id) || 0 }));
   const protectSeconds = num(reply && reply.protect_time);
-  return { dogs, foods, deployedId: currentDogId, foodSeconds: protectSeconds, protectSeconds: Math.max(protectSeconds, num(reply && reply.max_protect_time) || MAX_PROTECT_SECONDS), pendingGiftCount: num(reply && reply.pending_gift_count) };
+  const maxProtectSeconds = num(reply && reply.max_protect_time) || MAX_PROTECT_SECONDS;
+  return {
+    dogs,
+    foods,
+    deployedId: currentDogId,
+    // foodSeconds 同样来自 protect_time（喂食与护主共用该计时）。
+    foodSeconds: protectSeconds,
+    protectSeconds,
+    // 前端 PetSnapshot 读的是 protectDuration / maxProtectDuration，
+    // 与后端原有的 protectSeconds 命名不一致，两个都返回以兼容。
+    protectDuration: protectSeconds,
+    maxProtectDuration: maxProtectSeconds,
+    // 前端进度条按「已使用百分比」展示，这里给出已用比例。
+    usedPercent: maxProtectSeconds > 0
+      ? Math.min(100, Math.round((protectSeconds / maxProtectSeconds) * 100))
+      : 0,
+    // 守护记录接口已实现（/api/pets/protect-logs），显式开启该入口。
+    guardianRecordsSupported: true,
+    activeDogId: currentDogId,
+    remainingDuration: Math.max(0, maxProtectSeconds - protectSeconds),
+    pendingGiftCount: num(reply && reply.pending_gift_count)
+  };
 }
 
 async function getPetOverview() {
@@ -104,24 +177,31 @@ async function getPetOverview() {
 async function deployDog(dogIdInput) {
   const dogId = num(dogIdInput);
   if (!dogId) throw new Error('请选择要派出的宠物');
-  return serialize(async () => {
+  await serialize(async () => {
     const info = await getDogInfo();
     const dog = (info.dogs || []).find(item => num(item.id) === dogId);
     if (!dog || (num(dog.owned) !== 1 && num(info.current_dog_id) !== dogId)) throw new Error('尚未拥有该宠物');
     const payload = types.DeployDogRequest.encode(types.DeployDogRequest.create({ dog_id: dogId })).finish();
     await sendMsgAsync('gamepb.dogpb.DogService', 'DeployDog', payload);
     log('宠物', `已派出${metadata(dogId).name}`, { module: 'pet', event: '派出宠物', result: 'ok', dogId });
-    return { ok: true, dogId };
   });
+  // 必须回传最新快照：前端会用返回值整体替换 snapshot，
+  // 只返回 { ok, dogId } 会让 dogs/deployedId 变成 undefined，界面退回「暂未上场」。
+  // 注意只能在 serialize 锁外调用 —— getPetOverview() 内部会 await commandTail，
+  // 若嵌在锁内会与自身构成死锁（表现为 API Timeout）。
+  const snapshot = await getPetOverview();
+  return { ...snapshot, ok: true, dogId };
 }
 
 async function withdrawDog() {
-  return serialize(async () => {
+  await serialize(async () => {
     const payload = types.WithdrawDogRequest.encode(types.WithdrawDogRequest.create({})).finish();
     await sendMsgAsync('gamepb.dogpb.DogService', 'WithdrawDog', payload);
     log('宠物', '已召回宠物', { module: 'pet', event: '召回宠物', result: 'ok' });
-    return { ok: true };
   });
+  // 同 deployDog：必须在锁外取快照，否则 getPetOverview 与 commandTail 互相等待。
+  const snapshot = await getPetOverview();
+  return { ...snapshot, ok: true };
 }
 
 async function feedDog(foodIdInput, countInput = 1) {

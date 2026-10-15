@@ -2,6 +2,7 @@ const { PlantPhase, PHASE_NAMES } = require('../config/config');
 const { getPlantName, getPlantExp, getPlantById, getPlantGrowTime, getPlantGrowPhases, getSeedImageBySeedId, getMutantDisplayPlantId, getMutantPlantImageByPhase, getMutantEffectsByIds, getItemById } = require('../config/gameConfig');
 const { toNum, toTimeSec, getServerTimeSec, logWarn } = require('../utils/utils');
 const { getAllLands } = require('./farm-api');
+const { buildLandUpgradeDetail } = require('./land-upgrade');
 
 const GOLDEN_BUG_ITEM_ID = 301101;
 const GOLDEN_BUG_SOCIAL_TYPE = 2;
@@ -200,6 +201,8 @@ function buildLandDetail(land, options = {}) {
     occupiedByMaster: !!context.occupiedByMaster,
     masterLandId: toNum(context.masterLandId),
     occupiedLandIds: Array.isArray(context.occupiedLandIds) ? context.occupiedLandIds : [],
+    // 土地升级条件与消耗明细（移植自上游 land-upgrade）
+    landUpgrade: buildLandUpgradeDetail(land, landsMap),
     plantSize: 1,
     rarity: 0,
     mutantConfigIds: [],
@@ -833,7 +836,8 @@ async function getLandsDetail(propagateErrors = false) {
           couldUnlock, couldUpgrade,
           currentSeason: 0, totalSeason: 0,
           occupiedByMaster: false, masterLandId: 0,
-          occupiedLandIds: [], plantSize: 1
+          occupiedLandIds: [], plantSize: 1,
+          landUpgrade: buildLandUpgradeDetail(land, landMap),
         });
         continue;
       }
@@ -848,7 +852,8 @@ async function getLandsDetail(propagateErrors = false) {
           level, maxLevel, landsLevel, landSize, landType, landTypeName,
           couldUnlock, couldUpgrade,
           currentSeason: 0, totalSeason: 0,
-          occupiedByMaster, masterLandId, occupiedLandIds, plantSize: 1
+          occupiedByMaster, masterLandId, occupiedLandIds, plantSize: 1,
+          landUpgrade: buildLandUpgradeDetail(land, landMap),
         });
         continue;
       }
@@ -861,7 +866,8 @@ async function getLandsDetail(propagateErrors = false) {
           level, maxLevel, landsLevel, landSize, landType, landTypeName,
           couldUnlock, couldUpgrade,
           currentSeason: 0, totalSeason: 0,
-          occupiedByMaster, masterLandId, occupiedLandIds, plantSize: 1
+          occupiedByMaster, masterLandId, occupiedLandIds, plantSize: 1,
+          landUpgrade: buildLandUpgradeDetail(land, landMap),
         });
         continue;
       }
@@ -933,6 +939,7 @@ async function getLandsDetail(propagateErrors = false) {
         level, maxLevel, landsLevel, landSize, landType, landTypeName,
         couldUnlock, couldUpgrade,
         occupiedByMaster, masterLandId, occupiedLandIds,
+        landUpgrade: buildLandUpgradeDetail(land, landMap),
         plantSize, mutantEffects, qixiDew
       });
     }

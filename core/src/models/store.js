@@ -77,53 +77,98 @@ function getLocalDateKey(timestamp = Date.now()) {
     return `${year}-${month}-${day}`;
 }
 
-function normalizeFriendDogInfoCache(data, now = Date.now()) {
-    if (!data || typeof data.dogInfo !== 'object' || data.dogInfo === null) return null;
-    const cacheDate = String(data.cacheDate || getLocalDateKey(data.updatedAt));
-    if (!cacheDate || cacheDate !== getLocalDateKey(now)) return null;
-    return data.dogInfo;
-}
-
-function readFriendDogInfoCache(accountId) {
+function readFriendDogInfoCacheRaw(accountId, now = Date.now()) {
     try {
         const filePath = getFriendDogInfoCacheFile(accountId);
-        if (fs.existsSync(filePath)) {
-            const data = readJsonFile(filePath);
-            return normalizeFriendDogInfoCache(data);
-        }
+        if (!fs.existsSync(filePath)) return null;
+        const data = readJsonFile(filePath);
+        if (!data || typeof data !== 'object') return null;
+        const cacheDate = String(data.cacheDate || getLocalDateKey(data.updatedAt));
+        if (!cacheDate || cacheDate !== getLocalDateKey(now)) return null;
+        return data;
     } catch { }
     return null;
 }
 
-function writeFriendDogInfoCache(accountId, dogInfo) {
+function readFriendDogInfoCache(accountId) {
+    const data = readFriendDogInfoCacheRaw(accountId);
+    if (!data || typeof data.dogInfo !== 'object' || data.dogInfo === null) return null;
+    return data.dogInfo;
+}
+
+// 今天已确认过宠物状态的好友 GID（含“确认没有宠物”的）。
+// 用于前端区分「没查过 → 待确认」和「查过且没有宠物 → 无宠物」。
+function readFriendCheckedGids(accountId) {
+    const data = readFriendDogInfoCacheRaw(accountId);
+    if (!data || !Array.isArray(data.checkedGids)) return [];
+    return data.checkedGids.map(id => Number(id)).filter(id => id > 0);
+}
+
+// 已确认的看家宠物（含非护主犬），gid -> { dogId, dogName }。
+// dogInfo 只保留护主犬（friend-orchestrator 用它做「经验满只帮护主犬好友」的判断），
+// 其它宠物的信息放在这里，供前端徽标区分「无宠物」和「其它宠物」。
+function readFriendPets(accountId) {
+    const data = readFriendDogInfoCacheRaw(accountId);
+    if (!data || typeof data.pets !== 'object' || data.pets === null) return {};
+    return data.pets;
+}
+
+function writeFriendDogInfoCache(accountId, dogInfo, checkedGids, pets) {
     try {
         const filePath = getFriendDogInfoCacheFile(accountId);
         const updatedAt = Date.now();
-        writeJsonFileAtomic(filePath, {
+        const payload = {
             dogInfo: dogInfo || {},
             cacheDate: getLocalDateKey(updatedAt),
             updatedAt,
-        });
+        };
+        if (Array.isArray(checkedGids)) {
+            payload.checkedGids = [...new Set(checkedGids.map(id => Number(id)).filter(id => id > 0))];
+        }
+        if (pets && typeof pets === 'object' && !Array.isArray(pets)) {
+            payload.pets = pets;
+        }
+        writeJsonFileAtomic(filePath, payload);
     } catch { }
 }
 
 function updateFriendDogInfoCache(accountId, gid, dogInfo) {
     const numericGid = Number(gid) || 0;
     if (!accountId || !numericGid) return false;
-    const cache = readFriendDogInfoCache(accountId) || {};
+    const raw = readFriendDogInfoCacheRaw(accountId);
+    const cache = (raw && raw.dogInfo) || {};
+    const pets = (raw && typeof raw.pets === 'object' && raw.pets) ? { ...raw.pets } : {};
+    const checkedGids = raw && Array.isArray(raw.checkedGids) ? raw.checkedGids.map(Number) : [];
     const dogId = Number(dogInfo && dogInfo.dogId) || 0;
+    let changed = false;
     if (dogId === 90021) {
         const current = cache[numericGid];
-        if (current && Number(current.dogId) === dogId && current.dogName === (dogInfo.dogName || '护主犬')) {
-            return false;
+        if (!(current && Number(current.dogId) === dogId && current.dogName === (dogInfo.dogName || '护主犬'))) {
+            cache[numericGid] = { dogId, dogName: dogInfo.dogName || '护主犬' };
+            changed = true;
         }
-        cache[numericGid] = { dogId, dogName: dogInfo.dogName || '护主犬' };
     } else if (Object.hasOwn(cache, numericGid)) {
         delete cache[numericGid];
-    } else {
-        return false;
+        changed = true;
     }
-    writeFriendDogInfoCache(accountId, cache);
+    // 记录任意看家宠物（护主犬或其它），供前端显示成“其它宠物”而不是“无宠物”
+    if (dogId > 0) {
+        const next = { dogId, dogName: String((dogInfo && dogInfo.dogName) || '') };
+        if (JSON.stringify(pets[numericGid] || null) !== JSON.stringify(next)) {
+            pets[numericGid] = next;
+            changed = true;
+        }
+    } else if (Object.hasOwn(pets, numericGid)) {
+        delete pets[numericGid];
+        changed = true;
+    }
+    // 不论是否命中宠物，都记下“今天进过这位好友的农场、已确认过宠物”
+    if (!checkedGids.includes(numericGid)) {
+        checkedGids.push(numericGid);
+        changed = true;
+    }
+    if (!changed) return false;
+    writeFriendDogInfoCache(accountId, cache, checkedGids, pets);
     return true;
 }
 
@@ -167,12 +212,20 @@ function removeFriendFromCache(accountId, gid) {
         }
     } catch { }
 
-    // 从狗狗信息缓存中移除
+    // 从看家宠物缓存中移除
     try {
-        const dogInfo = readFriendDogInfoCache(accountId);
-        if (dogInfo && typeof dogInfo === 'object' && dogInfo[targetGid]) {
-            delete dogInfo[targetGid];
-            writeFriendDogInfoCache(accountId, dogInfo);
+        const raw = readFriendDogInfoCacheRaw(accountId);
+        const dogInfo = (raw && raw.dogInfo && typeof raw.dogInfo === 'object') ? { ...raw.dogInfo } : {};
+        const pets = (raw && raw.pets && typeof raw.pets === 'object') ? { ...raw.pets } : null;
+        const hasDog = Object.hasOwn(dogInfo, targetGid);
+        const hasPet = !!pets && Object.hasOwn(pets, targetGid);
+        if (hasDog || hasPet) {
+            if (hasDog) delete dogInfo[targetGid];
+            if (hasPet) delete pets[targetGid];
+            const checkedGids = Array.isArray(raw.checkedGids)
+                ? raw.checkedGids.map(Number).filter(id => id !== targetGid)
+                : undefined;
+            writeFriendDogInfoCache(accountId, dogInfo, checkedGids, pets || undefined);
         }
     } catch { }
 }
@@ -2158,6 +2211,8 @@ module.exports = {
     setUserDeviceProtocol,
     deleteUserDeviceProtocol,
     readFriendDogInfoCache,
+    readFriendCheckedGids,
+    readFriendPets,
     writeFriendDogInfoCache,
     updateFriendDogInfoCache,
     readFriendListCache,
@@ -2179,5 +2234,4 @@ module.exports._test = {
     CHARITY_FLOWER_AUTOMATION_KEYS,
     getInactiveActivityAutomationKeys,
     getLocalDateKey,
-    normalizeFriendDogInfoCache
 };

@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 
 const props = defineProps<{
   label?: string
-  options?: { label: string, value: string | number, disabled?: boolean }[]
+  options?: { label: string, value: string | number, disabled?: boolean, group?: string }[]
   disabled?: boolean
   placeholder?: string
 }>()
@@ -119,21 +119,27 @@ onUnmounted(() => {
           :style="{ maxHeight: `${dropdownMaxHeight}px` }"
         >
           <template v-if="options?.length">
-            <div
-              v-for="opt in options"
-              :key="opt.value"
-              class="cursor-pointer px-3 py-2 text-sm transition-colors hover:bg-gray-100 dark:hover:bg-gray-700/50"
-              :class="{
-                'text-primary': model === opt.value,
-                'text-gray-400 cursor-not-allowed hover:bg-transparent dark:text-gray-500': opt.disabled,
-                'text-gray-700 dark:text-gray-200': model !== opt.value && !opt.disabled,
-              }"
-              @click="!opt.disabled && selectOption(opt.value)"
-            >
-              <slot name="option" :option="opt" :selected="model === opt.value">
-                {{ opt.label }}
-              </slot>
-            </div>
+            <template v-for="(opt, index) in options" :key="opt.value">
+              <div
+                v-if="opt.group && opt.group !== options[index - 1]?.group"
+                class="px-3 pt-2 pb-1 text-xs text-gray-400 font-medium dark:text-gray-500"
+              >
+                {{ opt.group }}
+              </div>
+              <div
+                class="cursor-pointer px-3 py-2 text-sm transition-colors hover:bg-gray-100 dark:hover:bg-gray-700/50"
+                :class="{
+                  'text-primary': model === opt.value,
+                  'text-gray-400 cursor-not-allowed hover:bg-transparent dark:text-gray-500': opt.disabled,
+                  'text-gray-700 dark:text-gray-200': model !== opt.value && !opt.disabled,
+                }"
+                @click="!opt.disabled && selectOption(opt.value)"
+              >
+                <slot name="option" :option="opt" :selected="model === opt.value">
+                  {{ opt.label }}
+                </slot>
+              </div>
+            </template>
           </template>
           <div v-else class="px-3 py-2 text-center text-sm text-gray-400">
             暂无选项

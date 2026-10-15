@@ -7,6 +7,7 @@ const {
   getMutantDisplayPlantId,
   getMutantPlantImageByPhase,
   getMutantEffectsByIds,
+  getItemImageById,
 } = require('../config/gameConfig');
 const {
   toNum,
@@ -23,6 +24,8 @@ const {
   getPlantBlacklist,
   getFriendBlacklist,
   readFriendDogInfoCache,
+  readFriendCheckedGids,
+  readFriendPets,
   writeFriendDogInfoCache,
 } = require('../models/store');
 const {
@@ -42,6 +45,7 @@ const { classifyGatewayDefer, planNextSyncPacing } = require('./friend-dog-sync-
 
 const GOLDEN_BUG_ITEM_ID = 301101;
 const GOLDEN_BUG_SOCIAL_TYPE = 2;
+const GUARD_DOG_ID = 90021;
 
 // ===== Analyze friend lands =====
 
@@ -265,13 +269,46 @@ const FRIEND_LIST_REFRESH_MS = 5 * 60 * 1000;
 async function getFriendsList(forceRefresh = false) {
   if (friendsListPending) return friendsListPending;
   if (!forceRefresh && Date.now() < friendsListRefreshAt) return friendsListCache || [];
-  friendsListRefreshAt = Date.now() + FRIEND_LIST_REFRESH_MS;
   friendsListPending = fetchFriendsList();
   try {
-    return await friendsListPending;
+    const list = await friendsListPending;
+    // 只有真正取到好友才开启缓存窗口；抓取失败返回的空数组不能锁住 5 分钟，
+    // 否则面板会出现“暂无好友”且长时间不自动恢复。
+    if (Array.isArray(list) && list.length > 0) {
+      friendsListCache = list;
+      friendsListRefreshAt = Date.now() + FRIEND_LIST_REFRESH_MS;
+    }
+    return Array.isArray(list) ? list : [];
   } finally {
     friendsListPending = null;
   }
+}
+
+/**
+ * 把好友的看家宠物转成前端徽标契约：petState + pet。
+ * petState: protect(护主犬) / other(其它宠物) / none(已确认无宠物) / unknown(今天还没确认)
+ */
+function buildFriendPetInfo(dogId, dogName, checked = false) {
+  const numericDogId = toNum(dogId);
+  if (numericDogId === GUARD_DOG_ID) {
+    return {
+      petState: 'protect',
+      pet: {
+        name: dogName || getDogName(GUARD_DOG_ID) || '护主犬',
+        image: getItemImageById(GUARD_DOG_ID) || '',
+      },
+    };
+  }
+  if (numericDogId > 0) {
+    return {
+      petState: 'other',
+      pet: {
+        name: dogName || `宠物#${numericDogId}`,
+        image: getItemImageById(numericDogId) || '',
+      },
+    };
+  }
+  return { petState: checked ? 'none' : 'unknown', pet: { name: '', image: '' } };
 }
 
 async function fetchFriendsList() {
@@ -287,6 +324,10 @@ async function fetchFriendsList() {
     const userState = getUserState();
     const accountId = process.env.FARM_ACCOUNT_ID || '';
     const dogInfoCache = accountId ? readFriendDogInfoCache(accountId) : null;
+    const checkedGidSet = new Set(accountId ? readFriendCheckedGids(accountId) : []);
+    // 任意看家宠物（含非护主犬）缓存。dogInfoCache 只留护主犬，非护主犬必须从这里取，
+    // 否则刷新/重建容器后会退化成「宠物待确认」或「无宠物」。
+    const petsCache = accountId ? readFriendPets(accountId) : null;
 
     const friends = rawFriends
       .filter(friend => {
@@ -303,15 +344,21 @@ async function fetchFriendsList() {
       })
       .map(friend => {
         const gid = toNum(friend.gid);
-        const cachedDog = dogInfoCache && dogInfoCache[gid] ? dogInfoCache[gid] : null;
+        const cachedPet = petsCache && petsCache[gid] ? petsCache[gid] : null;
+        const cachedDog = cachedPet || (dogInfoCache && dogInfoCache[gid] ? dogInfoCache[gid] : null);
+        const dogId = cachedDog ? toNum(cachedDog.dogId) : 0;
+        const dogName = cachedDog ? String(cachedDog.dogName || '') : '';
+        const petChecked = !!cachedPet || checkedGidSet.has(gid);
         return {
           gid,
           name: friend.remark || friend.name || `GID:${gid}`,
           avatarUrl: String(friend.avatar_url || '').trim(),
           level: toNum(friend.level),
           gold: toNum(friend.gold),
-          dogId: cachedDog ? cachedDog.dogId : 0,
-          dogName: cachedDog ? cachedDog.dogName : '',
+          dogId,
+          dogName,
+          // 前端宠物徽标契约：petState + pet（不要只读 dogId，否则永远“待确认”）
+          ...buildFriendPetInfo(dogId, dogName, petChecked),
           plant: friend.plant
             ? {
                 stealNum: toNum(friend.plant.steal_plant_num),
@@ -380,13 +427,23 @@ async function fetchFriendsDogInfo() {
   const { map: dogMap, failCount, blacklistCount } = syncResult;
 
   const guardDogFriends = {};
+  // 任意看家宠物（含非护主犬）：单独落盘，避免刷新/重建容器后宠物徽标退化成“待确认”
+  const petsByGid = {};
   for (const friend of friends) {
     const dogInfo = dogMap.get(friend.gid);
     if (dogInfo) {
       friend.dogId = dogInfo.dogId;
       friend.dogName = dogInfo.dogName;
       friend.blacklisted = dogInfo.blacklisted || false;
-      if (friend.dogId === 90021) {
+      // 这一轮已经确认过该好友的宠物状态
+      Object.assign(friend, buildFriendPetInfo(friend.dogId, friend.dogName, true));
+      if (toNum(friend.dogId) > 0) {
+        petsByGid[toNum(friend.gid)] = {
+          dogId: toNum(friend.dogId),
+          dogName: String(friend.dogName || ''),
+        };
+      }
+      if (friend.dogId === GUARD_DOG_ID) {
         guardDogFriends[friend.gid] = {
           dogId: friend.dogId,
           dogName: friend.dogName,
@@ -397,21 +454,25 @@ async function fetchFriendsDogInfo() {
 
   friendsListCache = friends;
 
-  // Persist guard dog info to disk cache
+  // Persist guard dog info to disk cache.
+  // checkedGids 记录本轮已确认过的好友，用于区分「待确认」与「无宠物」。
+  // petsByGid 记录任意看家宠物（含非护主犬），供前端徽标显示。
   if (accountId && syncResult.deferredGids.length === 0) {
-    writeFriendDogInfoCache(accountId, guardDogFriends);
+    writeFriendDogInfoCache(accountId, guardDogFriends, friends.map(f => toNum(f.gid)), petsByGid);
   }
 
   const guardDogCount = friends.filter(f => f.dogId === 90021).length;
+  const otherPetCount = Object.keys(petsByGid).length - guardDogCount;
 
   log('好友',
-    `获取完成：共 ${friends.length} 个好友，护主犬 ${guardDogCount} 个，无狗 ${failCount} 个，黑名单 ${blacklistCount} 个`,
+    `获取完成：共 ${friends.length} 个好友，护主犬 ${guardDogCount} 个，其它宠物 ${otherPetCount} 个，无狗 ${failCount} 个，黑名单 ${blacklistCount} 个`,
     {
       module: 'friend',
       event: '狗信息',
       result: 'ok',
       count: friends.length,
       guardDogCount,
+      otherPetCount,
       failCount,
       blacklistCount,
     }
@@ -424,6 +485,7 @@ async function fetchFriendsDogInfo() {
     failCount,
     blacklistCount,
     guardDogCount,
+    otherPetCount,
     deferredGids: syncResult.deferredGids,
     deferredKind: syncResult.deferredKind,
     retryMs: syncResult.retryMs,

@@ -77,6 +77,7 @@ export interface FriendInteractionBatchDto {
 export const useFriendStore = defineStore('friend', () => {
   const friends = ref<any[]>([])
   const loading = ref(false)
+  const friendsError = ref('')
   const friendLands = ref<Record<string, any[]>>({})
   const friendLandsLoading = ref<Record<string, boolean>>({})
   const friendLandsError = ref<Record<string, string>>({})
@@ -306,8 +307,9 @@ export const useFriendStore = defineStore('friend', () => {
 
   async function fetchFriends(accountId: string, forceSync = false) {
     if (!accountId)
-      return
+      return false
     loading.value = true
+    friendsError.value = ''
     try {
       const res = await api.get('/api/friends', {
         headers: { 'x-account-id': accountId },
@@ -315,7 +317,14 @@ export const useFriendStore = defineStore('friend', () => {
       })
       if (res.data.ok) {
         friends.value = res.data.data || []
+        return true
       }
+      friendsError.value = getApiErrorMessage(res.data, '获取好友列表失败')
+      return false
+    }
+    catch (e) {
+      friendsError.value = getApiErrorMessage(e, '获取好友列表失败')
+      return false
     }
     finally {
       loading.value = false
@@ -772,6 +781,7 @@ export const useFriendStore = defineStore('friend', () => {
   return {
     friends,
     loading,
+    friendsError,
     friendLands,
     friendLandsLoading,
     friendLandsError,
