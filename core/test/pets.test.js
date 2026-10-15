@@ -50,7 +50,11 @@ test('bichon metadata and official image resolve for owned and unowned pets', ()
   assert.deepEqual({ ...owned.find(dog => dog.id === 90031) }, {
     // active 与 deployed 同时返回（前端 PetInfo 读 active，早期页面读 deployed），
     // 上场时两者都为 true。
-    ...unowned, owned: true, activatable: false, deployed: true, active: true, level: 3
+    // obtainCondition 只在未拥有时提示获得途径，已拥有则为空。
+    // status 编码：0 未拥有 / 1 拥有未上场 / 2 拥有且上场 / 3 有卡可激活，
+    // 这里比熊已拥有且是上场宠物，故为 2。
+    ...unowned, owned: true, activatable: false, deployed: true, active: true, level: 3,
+    obtainCondition: '', status: 2
   });
   assert.equal(unowned.image, image);
   assert.match(unowned.desc, /比熊润田/);
