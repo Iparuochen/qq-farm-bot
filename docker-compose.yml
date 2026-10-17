@@ -31,7 +31,9 @@ services:
       # CAPTURE_ADVERTISE_IPS=192.168.1.100,100.64.0.2
 
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3007/api/status"]
+      # 127.0.0.1 而非 localhost（容器内 localhost 走 ::1，node 只监听 IPv4）；
+      # /api/health 而非 /api/status（后者需登录，会返回 401）。
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3007/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3

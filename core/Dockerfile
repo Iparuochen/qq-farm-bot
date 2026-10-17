@@ -61,7 +61,10 @@ VOLUME ["/app/core/data"]
 
 EXPOSE 3007 18000
 
+# 必须写 127.0.0.1 而不是 localhost：容器内 localhost 优先解析到 ::1，
+# 而 node 只监听 IPv4，走 ::1 会 Connection refused 导致容器一直 unhealthy。
+# 端点用 /api/health：它是唯一免鉴权的探针，/api/status 需要登录会返回 401。
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD wget -q --spider http://localhost:3007/api/status || exit 1
+    CMD wget -q --spider http://127.0.0.1:3007/api/health || exit 1
 
 CMD ["node", "client.js"]
