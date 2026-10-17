@@ -39,25 +39,28 @@ jobs:
             echo "in_sync=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Rebase onto upstream/main
+      # 用 merge 而不是 rebase：本仓库在本地自定义之上有上百个提交，
+      # rebase 会把它们逐个重放、冲突一个一个解，代价极高；merge 保留双向
+      # 历史，冲突只需一次性解决，并且不需要强推。
+      - name: Merge upstream/main
         if: steps.check.outputs.in_sync == 'false'
-        id: rebase
+        id: merge
         continue-on-error: true
         run: |
           git config user.name "muyuewang"
           git config user.email "550975101@qq.com"
-          git rebase upstream/main
+          git merge upstream/main --no-edit
 
-      - name: Push rebased result
-        if: steps.rebase.outcome == 'success'
-        run: git push origin main --force-with-lease
+      - name: Push merged result
+        if: steps.merge.outcome == 'success'
+        run: git push origin main
 
       - name: Rollback on conflict
-        if: steps.rebase.outcome == 'failure'
-        run: git rebase --abort
+        if: steps.merge.outcome == 'failure'
+        run: git merge --abort
 
       - name: Open conflict issue
-        if: steps.rebase.outcome == 'failure'
+        if: steps.merge.outcome == 'failure'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -66,7 +69,7 @@ jobs:
             --title "上游同步冲突，需要手动处理" \
             --body "## 上游同步冲突
 
-          自动 rebase 上游 https://github.com/xxxscarlxrd404/qq-farm-bot/main 时发生冲突，已回滚。
+          自动 merge 上游 https://github.com/xxxscarlxrd404/qq-farm-bot/main 时发生冲突，已回滚。
 
           ### 冲突文件
           \`\`\`
@@ -78,11 +81,11 @@ jobs:
 
           \`\`\`bash
           git fetch upstream
-          git rebase upstream/main
+          git merge upstream/main
           # 解决冲突后
           git add <冲突文件>
-          git rebase --continue
-          git push origin main --force-with-lease
+          git commit
+          git push origin main
           \`\`\`
 
           冲突通常来自上游改动了本地保留的登录/卡密/后台管理相关文件。" \
